@@ -3,7 +3,13 @@ set -euo pipefail
 
 npm ci
 VITEST_VERSION="$(node -p "require('./node_modules/vitest/package.json').version")"
-npm install --no-save --package-lock=false "@vitest/coverage-v8@${VITEST_VERSION}"
+CURRENT_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+COVERAGE_PREFIX="${CURRENT_TEMP%/}/vitest-coverage-provider"
+mkdir -p "$COVERAGE_PREFIX"
+npm install --prefix "$COVERAGE_PREFIX" --no-save --package-lock=false \
+  "@vitest/coverage-v8@${VITEST_VERSION}"
+mkdir -p node_modules/@vitest
+ln -s "$COVERAGE_PREFIX/node_modules/@vitest/coverage-v8" node_modules/@vitest/coverage-v8
 npm test -- --coverage --coverage.reporter=lcov '--coverage.include=src/**/*.{ts,tsx}'
 
 test -s coverage/lcov.info || {
