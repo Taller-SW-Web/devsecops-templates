@@ -34,13 +34,18 @@ jobs:
       codeql_language: ${{ steps.policy.outputs.codeql_language }}
       codeql_build_mode: ${{ steps.policy.outputs.codeql_build_mode }}
     steps:
-      - name: Require Pull Request Context
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
+      - name: Validate Pull Request Context
         env:
           EVENT_NAME: ${{ github.event_name }}
           LANGUAGE: ${{ inputs.language }}
-        run: |
-          test "$EVENT_NAME" = pull_request
-          test -n "$LANGUAGE"
+        run: bash .devsecops-templates/scripts/analysis/validate-pr-context.sh
       - uses: Taller-SW-Web/github-actions/analysis-validator@main
         id: policy
         with:
@@ -56,17 +61,22 @@ jobs:
     outputs:
       outcome: ${{ steps.outcome.outputs.value }}
     steps:
-      - name: Validate SonarQube Configuration
-        env:
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-          SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
-        run: |
-          test -n "$SONAR_TOKEN" || { echo '::error::Missing SONAR_TOKEN'; exit 1; }
-          [[ "$SONAR_HOST_URL" == https://* ]] || { echo '::error::Configure HTTPS SONAR_HOST_URL'; exit 1; }
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
+      - name: Check SonarQube Configuration
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
+        run: bash .devsecops-templates/scripts/analysis/validate-sonar-config.sh
       - name: Derive Project Identity
         id: project
         uses: actions/github-script@v7
@@ -90,7 +100,7 @@ jobs:
           cache: maven
       - name: Prepare Java Bytecode for Static Analysis
         if: inputs.technology == 'maven'
-        run: bash ./mvnw -B -Dmaven.test.skip=true package
+        run: bash .devsecops-templates/scripts/analysis/maven-codeql-extract.sh
       - name: SonarQube Java Analysis
         if: inputs.technology == 'maven'
         uses: SonarSource/sonarqube-scan-action@v6
@@ -132,9 +142,10 @@ jobs:
         if: always()
         env:
           RAW_STATUS: ${{ job.status }}
-        run: |
-          echo "value=$RAW_STATUS" >> "$GITHUB_OUTPUT"
-          printf '### SonarQube scan\nExecution: **%s**. Quality Gate is evaluated separately.\n' "$RAW_STATUS" >> "$GITHUB_STEP_SUMMARY"
+          SUMMARY_TEXT: |-
+            ### SonarQube scan
+            Execution: **${{ job.status }}**. Quality Gate is evaluated separately.
+        run: bash .devsecops-templates/scripts/analysis/record-analysis-outcome.sh
   sonar_gate:
     name: SonarQube - Quality Gate and Metrics
     needs: [validation, sonar_analysis]
@@ -146,6 +157,13 @@ jobs:
       outcome: ${{ steps.outcome.outputs.value }}
       gate: ${{ steps.gate.outputs.gate }}
     steps:
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: sonar-task-${{ github.run_attempt }}
@@ -169,9 +187,9 @@ jobs:
         if: always()
         env:
           RAW_STATUS: ${{ job.status }}
-        run: |
-          echo "value=$RAW_STATUS" >> "$GITHUB_OUTPUT"
-          printf '\nQuality Gate execution: **%s**. If no metrics were produced, inspect the API/configuration error in this job.\n' "$RAW_STATUS" >> "$GITHUB_STEP_SUMMARY"
+          SUMMARY_TEXT: |-
+            Quality Gate execution: **${{ job.status }}**. If no metrics were produced, inspect the API/configuration error in this job.
+        run: bash .devsecops-templates/scripts/analysis/record-analysis-outcome.sh
   ghas_sast:
     name: GHAS - SAST / CodeQL (${{ inputs.language }})
     needs: validation
@@ -190,6 +208,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
       - uses: actions/setup-java@v4
         if: inputs.technology == 'maven'
         with:
@@ -204,7 +229,7 @@ jobs:
           queries: security-extended
       - name: Extract Compiled Java Code
         if: inputs.technology == 'maven'
-        run: bash ./mvnw -B -Dmaven.test.skip=true clean package
+        run: bash .devsecops-templates/scripts/analysis/maven-codeql-extract.sh
       - name: Analyze and Publish Code Scanning Results
         id: analyze
         uses: github/codeql-action/analyze@v4
@@ -231,9 +256,9 @@ jobs:
         if: always()
         env:
           RAW_STATUS: ${{ job.status }}
-        run: |
-          echo "value=$RAW_STATUS" >> "$GITHUB_OUTPUT"
-          printf '\nGHAS SAST execution: **%s**. SARIF, when generated, is attached to this run.\n' "$RAW_STATUS" >> "$GITHUB_STEP_SUMMARY"
+          SUMMARY_TEXT: |-
+            GHAS SAST execution: **${{ job.status }}**. SARIF, when generated, is attached to this run.
+        run: bash .devsecops-templates/scripts/analysis/record-analysis-outcome.sh
   ghas_sca:
     name: GHAS - SCA / Dependency Review
     needs: validation
@@ -244,6 +269,13 @@ jobs:
       outcome: ${{ steps.outcome.outputs.value }}
       vulnerabilities: ${{ steps.export.outputs.vulnerabilities }}
     steps:
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
       - name: Review Dependency Changes and Vulnerabilities
         id: review
         uses: actions/dependency-review-action@v4
@@ -281,7 +313,7 @@ jobs:
         if: always()
         env:
           RAW_STATUS: ${{ job.status }}
-        run: echo "value=$RAW_STATUS" >> "$GITHUB_OUTPUT"
+        run: bash .devsecops-templates/scripts/analysis/record-job-outcome.sh
   status:
     name: Security Policy Result
     needs: [validation, sonar_analysis, sonar_gate, ghas_sast, ghas_sca]

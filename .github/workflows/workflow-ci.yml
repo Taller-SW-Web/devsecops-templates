@@ -46,6 +46,13 @@ jobs:
         with:
           ref: ${{ inputs.source_sha || github.sha }}
           persist-credentials: false
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
       - uses: actions/setup-java@v4
         if: inputs.technology == 'maven'
         with:
@@ -54,7 +61,7 @@ jobs:
           cache: maven
       - name: Verify Maven Application
         if: inputs.technology == 'maven'
-        run: bash ./mvnw -B verify
+        run: bash .devsecops-templates/scripts/ci/maven-verify.sh
       - uses: actions/setup-node@v4
         if: inputs.technology == 'node'
         with:
@@ -62,10 +69,7 @@ jobs:
           cache: npm
       - name: Verify Node Application
         if: inputs.technology == 'node'
-        run: |
-          npm ci
-          npm test
-          npm run build
+        run: bash .devsecops-templates/scripts/ci/run-node-checks.sh
       - name: Publish Test Reports
         if: always() && inputs.technology == 'maven'
         uses: actions/upload-artifact@v4
@@ -81,6 +85,18 @@ jobs:
     timeout-minutes: 20
     continue-on-error: ${{ needs.validation.outputs.blocking != 'true' }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
       - name: Derive SonarQube Project Key
         id: project
         uses: actions/github-script@v7
@@ -103,15 +119,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
           SONAR_PROJECT_KEY: ${{ steps.project.outputs.project_key }}
-        run: |
-          test -n "$SONAR_TOKEN" || { echo '::error::Missing SONAR_TOKEN'; exit 1; }
-          test -n "$SONAR_HOST_URL" || { echo '::error::Missing SONAR_HOST_URL'; exit 1; }
-          test -n "$SONAR_PROJECT_KEY" || { echo '::error::Missing SONAR_PROJECT_KEY'; exit 1; }
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_sha || github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
+        run: bash .devsecops-templates/scripts/ci/validate-sonar-config.sh
       - uses: actions/setup-java@v4
         if: inputs.technology == 'maven'
         with:
@@ -120,7 +128,7 @@ jobs:
           cache: maven
       - name: Prepare Java Bytecode
         if: inputs.technology == 'maven'
-        run: bash ./mvnw -B -DskipTests package
+        run: bash .devsecops-templates/scripts/ci/maven-sonar-bytecode.sh
       - name: Analyze Java with SonarQube
         if: inputs.technology == 'maven'
         uses: SonarSource/sonarqube-scan-action@v6

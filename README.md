@@ -1,7 +1,9 @@
 # Retail CI/CD
 
 Implementacion del patron caller -> reusable workflow -> acciones compartidas.
-Los callers consumen las acciones y plantillas compartidas mediante commits inmutables. Los resultados efectivos de analisis y despliegue se consultan en GitHub Actions.
+Los callers consumen las acciones y plantillas compartidas mediante `@main`. Los resultados efectivos de analisis y despliegue se consultan en GitHub Actions.
+
+Los pasos Bash reutilizados viven en `scripts/` como archivos `.sh`; los workflows obtienen ese directorio con un checkout adicional de este repositorio en `.devsecops-templates/`. Los bloques JavaScript que usan `actions/github-script` se mantienen en sus acciones porque usan el contexto y la API de GitHub Actions.
 
 ## Archivos por repositorio
 

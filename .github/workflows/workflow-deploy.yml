@@ -59,13 +59,18 @@ jobs:
           rollback: ${{ inputs.rollback }}
           release_tag: ${{ inputs.release_tag }}
           token: ${{ secrets.GH_TOKEN_G4 || github.token }}
-      - name: Validate Deployment Configuration
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
+      - name: Check Deployment Configuration
         env:
           TECHNOLOGY: ${{ inputs.technology }}
           HEALTHCHECK_URL: ${{ inputs.healthcheck_url }}
-        run: |
-          [[ "$TECHNOLOGY" == maven || "$TECHNOLOGY" == node ]] || exit 1
-          [[ "$HEALTHCHECK_URL" == https://* ]] || { echo '::error::Configure an HTTPS PRODUCTION_HEALTHCHECK_URL'; exit 1; }
+        run: bash .devsecops-templates/scripts/deploy/validate-deployment-config.sh
   integration:
     name: Production Quality Verification
     needs: validation
@@ -90,6 +95,13 @@ jobs:
         with:
           ref: ${{ needs.validation.outputs.source_sha }}
           persist-credentials: false
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -98,33 +110,24 @@ jobs:
         env:
           RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
           SERVICE_NAME: ${{ secrets.RAILWAY_SERVICE }}
-        run: |
-          test -n "$RAILWAY_TOKEN" && test -n "$SERVICE_NAME"
-          npm install -g @railway/cli
-          railway up --service "$SERVICE_NAME"
+        run: bash .devsecops-templates/scripts/deploy/deploy-railway.sh
       - name: Deploy Vercel Application
         if: inputs.technology == 'node'
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
           VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-        run: |
-          test -n "$VERCEL_TOKEN" && test -n "$VERCEL_ORG_ID" && test -n "$VERCEL_PROJECT_ID"
-          npm install -g vercel
-          vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
-          vercel build --prod --token="$VERCEL_TOKEN"
-          vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+        run: bash .devsecops-templates/scripts/deploy/deploy-vercel.sh
       - name: Verify Production Health
         env:
           HEALTHCHECK_URL: ${{ inputs.healthcheck_url }}
-        run: curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 10 --max-time 20 "$HEALTHCHECK_URL"
+        run: bash .devsecops-templates/scripts/deploy/verify-production-health.sh
       - name: Record Deployment Summary
         env:
           SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
           ROLLBACK: ${{ inputs.rollback }}
           RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          printf '### Production deployment\nCommit: `%s`\n\nRollback: %s\n\nSource tag: %s\n' "$SOURCE_SHA" "$ROLLBACK" "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+        run: bash .devsecops-templates/scripts/deploy/write-deployment-summary.sh
   release:
     name: Create Production Release Tag
     needs: [validation, deployment]
