@@ -11,6 +11,10 @@ on:
       source_sha:
         type: string
         default: ''
+      sonar_organization:
+        description: Optional SonarQube Cloud organization; defaults to the GitHub owner in lowercase
+        type: string
+        default: ''
       sonar_host_url:
         required: true
         type: string
@@ -80,8 +84,17 @@ jobs:
       - name: Derive SonarQube Project Key
         id: project
         uses: actions/github-script@v7
+        env:
+          SONAR_SERVER: ${{ inputs.sonar_host_url }}
+          SONAR_ORGANIZATION: ${{ inputs.sonar_organization }}
         with:
           script: |
+            const host = new URL(process.env.SONAR_SERVER).hostname;
+            if (['sonarcloud.io', 'sonarqube.us'].includes(host)) {
+              const organization = process.env.SONAR_ORGANIZATION || context.repo.owner.toLowerCase();
+              if (!/^[a-zA-Z0-9_.:-]+$/.test(organization)) throw new Error('Invalid SonarQube Cloud organization key');
+              core.setOutput('organization_argument', `-Dsonar.organization=${organization}`);
+            }
             const key = `${context.repo.owner}_${context.repo.repo}`;
             core.setOutput('project_key', key);
             await core.summary.addHeading('SonarQube project').addRaw(`Project key: ${key}`).write();
@@ -116,6 +129,7 @@ jobs:
           SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
         with:
           args: >-
+            ${{ steps.project.outputs.organization_argument }}
             -Dsonar.projectKey=${{ steps.project.outputs.project_key }}
             -Dsonar.sources=src/main/java
             -Dsonar.tests=src/test/java
@@ -131,6 +145,7 @@ jobs:
           SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
         with:
           args: >-
+            ${{ steps.project.outputs.organization_argument }}
             -Dsonar.projectKey=${{ steps.project.outputs.project_key }}
             -Dsonar.sources=src
             -Dsonar.exclusions=**/*.test.*,**/*.spec.*

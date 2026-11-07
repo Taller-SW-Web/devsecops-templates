@@ -13,6 +13,10 @@ on:
         description: java for Maven; javascript or typescript for Node
         required: true
         type: string
+      sonar_organization:
+        description: Optional SonarQube Cloud organization; defaults to the GitHub owner in lowercase
+        type: string
+        default: ''
       sonar_host_url:
         required: true
         type: string
@@ -66,8 +70,18 @@ jobs:
       - name: Derive Project Identity
         id: project
         uses: actions/github-script@v7
+        env:
+          SONAR_SERVER: ${{ inputs.sonar_host_url }}
+          SONAR_ORGANIZATION: ${{ inputs.sonar_organization }}
         with:
-          script: core.setOutput('key', `${context.repo.owner}_${context.repo.repo}`);
+          script: |
+            const host = new URL(process.env.SONAR_SERVER).hostname;
+            if (['sonarcloud.io', 'sonarqube.us'].includes(host)) {
+              const organization = process.env.SONAR_ORGANIZATION || context.repo.owner.toLowerCase();
+              if (!/^[a-zA-Z0-9_.:-]+$/.test(organization)) throw new Error('Invalid SonarQube Cloud organization key');
+              core.setOutput('organization_argument', `-Dsonar.organization=${organization}`);
+            }
+            core.setOutput('key', `${context.repo.owner}_${context.repo.repo}`);
       - uses: actions/setup-java@v4
         if: inputs.technology == 'maven'
         with:
@@ -85,6 +99,7 @@ jobs:
           SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
         with:
           args: >-
+            ${{ steps.project.outputs.organization_argument }}
             -Dsonar.projectKey=${{ steps.project.outputs.key }}
             -Dsonar.sources=src/main/java
             -Dsonar.tests=src/test/java
@@ -99,6 +114,7 @@ jobs:
           SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
         with:
           args: >-
+            ${{ steps.project.outputs.organization_argument }}
             -Dsonar.projectKey=${{ steps.project.outputs.key }}
             -Dsonar.sources=src
             -Dsonar.exclusions=**/*.test.*,**/*.spec.*

@@ -83,6 +83,8 @@ Configurar en **cada repositorio de aplicacion**, Settings -> Secrets and variab
 | Variable | `PRODUCTION_HEALTHCHECK_URL` | Endpoint HTTPS publico que devuelve HTTP 2xx/3xx cuando la aplicacion esta saludable |
 | Secret | `GH_TOKEN_G4` | Token con Members (read) de la organizacion y Contents/Actions (read) del repositorio; permite consultar la membresia del equipo y validar tags/runs |
 
+Para SonarQube Cloud (`sonarcloud.io` / `sonarqube.us`), `sonar.organization` se resuelve con el propietario GitHub en minusculas: `taller-sw-web`. El input opcional `sonar_organization` permite cambiarlo si la organizacion Cloud utiliza otra clave. En SonarQube Server no se envia esa propiedad. Desactivar Automatic Analysis en Cloud al usar este flujo de analisis CI.
+
 La clave del proyecto SonarQube se deriva internamente del repositorio caller como `<organizacion>_<repositorio>`, conservando mayusculas: `Taller-SW-Web_G4-Retail-backend` y `Taller-SW-Web_G4-Retail-frontend`. No configurar `SONAR_PROJECT_KEY` ni pasar ese input en callers. `SONAR_HOST_URL` sigue siendo la URL del servidor y `PRODUCTION_HEALTHCHECK_URL` el endpoint de salud; esas URLs no se deducen del nombre del repositorio.
 
 Backend conserva los secretos existentes `RAILWAY_TOKEN` y `RAILWAY_SERVICE` (este ultimo ya esta guardado como secreto). El token debe apuntar al proyecto/ambiente productivo. Frontend conserva `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`.

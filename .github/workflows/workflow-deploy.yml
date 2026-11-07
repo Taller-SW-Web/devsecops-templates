@@ -14,6 +14,10 @@ on:
       release_tag:
         type: string
         default: ''
+      sonar_organization:
+        description: Optional SonarQube Cloud organization; defaults to the GitHub owner in lowercase
+        type: string
+        default: ''
       sonar_host_url:
         required: true
         type: string
@@ -72,6 +76,7 @@ jobs:
       technology: ${{ inputs.technology }}
       source_sha: ${{ needs.validation.outputs.source_sha }}
       sonar_host_url: ${{ inputs.sonar_host_url }}
+      sonar_organization: ${{ inputs.sonar_organization }}
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
   deployment:
