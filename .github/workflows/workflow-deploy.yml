@@ -1,0 +1,142 @@
+name: Production Delivery and Authorized Rollback
+on:
+  workflow_call:
+    inputs:
+      component_name:
+        required: true
+        type: string
+      technology:
+        required: true
+        type: string
+      rollback:
+        type: boolean
+        default: false
+      release_tag:
+        type: string
+        default: ''
+      sonar_host_url:
+        required: true
+        type: string
+      healthcheck_url:
+        required: true
+        type: string
+    secrets:
+      SONAR_TOKEN:
+        required: false
+      GH_TOKEN_G4:
+        required: false
+      RAILWAY_TOKEN:
+        required: false
+      RAILWAY_SERVICE:
+        required: false
+      VERCEL_TOKEN:
+        required: false
+      VERCEL_ORG_ID:
+        required: false
+      VERCEL_PROJECT_ID:
+        required: false
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: production-${{ github.repository }}
+  cancel-in-progress: false
+jobs:
+  validation:
+    name: Validate GitHub Team Membership
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.authorization.outputs.source_sha }}
+    steps:
+      - name: Verify Actor Team Membership
+        uses: Taller-SW-Web/github-actions/deployment-validator@ce0ecc901f8c49a5a35ab2b88b483fc1736d85c1
+        id: authorization
+        with:
+          rollback: ${{ inputs.rollback }}
+          release_tag: ${{ inputs.release_tag }}
+          token: ${{ secrets.GH_TOKEN_G4 || github.token }}
+      - name: Validate Deployment Configuration
+        env:
+          TECHNOLOGY: ${{ inputs.technology }}
+          HEALTHCHECK_URL: ${{ inputs.healthcheck_url }}
+        run: |
+          [[ "$TECHNOLOGY" == maven || "$TECHNOLOGY" == node ]] || exit 1
+          [[ "$HEALTHCHECK_URL" == https://* ]] || { echo '::error::Configure an HTTPS PRODUCTION_HEALTHCHECK_URL'; exit 1; }
+  integration:
+    name: Production Quality Verification
+    needs: validation
+    if: inputs.rollback == false
+    uses: ./.github/workflows/workflow-ci.yml
+    with:
+      component_name: ${{ inputs.component_name }}
+      technology: ${{ inputs.technology }}
+      source_sha: ${{ needs.validation.outputs.source_sha }}
+      sonar_host_url: ${{ inputs.sonar_host_url }}
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  deployment:
+    name: Deploy Production Release
+    needs: [validation, integration]
+    if: ${{ !cancelled() && needs.validation.result == 'success' && (needs.integration.result == 'success' || (inputs.rollback && needs.integration.result == 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validation.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Deploy Railway Application
+        if: inputs.technology == 'maven'
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+          SERVICE_NAME: ${{ secrets.RAILWAY_SERVICE }}
+        run: |
+          test -n "$RAILWAY_TOKEN" && test -n "$SERVICE_NAME"
+          npm install -g @railway/cli
+          railway up --service "$SERVICE_NAME"
+      - name: Deploy Vercel Application
+        if: inputs.technology == 'node'
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          test -n "$VERCEL_TOKEN" && test -n "$VERCEL_ORG_ID" && test -n "$VERCEL_PROJECT_ID"
+          npm install -g vercel
+          vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+          vercel build --prod --token="$VERCEL_TOKEN"
+          vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN"
+      - name: Verify Production Health
+        env:
+          HEALTHCHECK_URL: ${{ inputs.healthcheck_url }}
+        run: curl --fail --silent --show-error --retry 12 --retry-all-errors --retry-delay 10 --max-time 20 "$HEALTHCHECK_URL"
+      - name: Record Deployment Summary
+        env:
+          SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
+          ROLLBACK: ${{ inputs.rollback }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          printf '### Production deployment\nCommit: `%s`\n\nRollback: %s\n\nSource tag: %s\n' "$SOURCE_SHA" "$ROLLBACK" "$RELEASE_TAG" >> "$GITHUB_STEP_SUMMARY"
+  release:
+    name: Create Production Release Tag
+    needs: [validation, deployment]
+    if: ${{ !cancelled() && needs.deployment.result == 'success' && !inputs.rollback }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
+        with:
+          script: |
+            const tag = `production-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
+            const { data } = await github.rest.git.createTag({
+              ...context.repo, tag, message: `Production deployment ${context.runId}`, type: 'commit',
+              object: process.env.SOURCE_SHA
+            });
+            await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${tag}`, sha: data.sha });
+            await core.summary.addHeading('Production release').addRaw(`Tag: ${tag}\n`).write();

@@ -1,0 +1,292 @@
+name: Pull Request Security and Code Quality
+on:
+  workflow_call:
+    inputs:
+      component_name:
+        required: true
+        type: string
+      technology:
+        description: maven or node
+        required: true
+        type: string
+      language:
+        description: java for Maven; javascript or typescript for Node
+        required: true
+        type: string
+      sonar_host_url:
+        required: true
+        type: string
+    secrets:
+      SONAR_TOKEN:
+        required: false
+permissions:
+  contents: read
+jobs:
+  validation:
+    name: Validate Analysis Policy and Language
+    runs-on: ubuntu-latest
+    outputs:
+      blocking: ${{ steps.policy.outputs.blocking }}
+      codeql_language: ${{ steps.policy.outputs.codeql_language }}
+      codeql_build_mode: ${{ steps.policy.outputs.codeql_build_mode }}
+    steps:
+      - name: Require Pull Request Context
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          LANGUAGE: ${{ inputs.language }}
+        run: |
+          test "$EVENT_NAME" = pull_request
+          test -n "$LANGUAGE"
+      - uses: Taller-SW-Web/github-actions/analysis-validator@ce0ecc901f8c49a5a35ab2b88b483fc1736d85c1
+        id: policy
+        with:
+          technology: ${{ inputs.technology }}
+          language: ${{ inputs.language }}
+  sonar_analysis:
+    name: SonarQube - SAST and Code Quality
+    needs: validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Only the final policy job is required. Raw outcomes are preserved explicitly.
+    continue-on-error: true
+    outputs:
+      outcome: ${{ steps.outcome.outputs.value }}
+    steps:
+      - name: Validate SonarQube Configuration
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
+        run: |
+          test -n "$SONAR_TOKEN" || { echo '::error::Missing SONAR_TOKEN'; exit 1; }
+          [[ "$SONAR_HOST_URL" == https://* ]] || { echo '::error::Configure HTTPS SONAR_HOST_URL'; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Derive Project Identity
+        id: project
+        uses: actions/github-script@v7
+        with:
+          script: core.setOutput('key', `${context.repo.owner}_${context.repo.repo}`);
+      - uses: actions/setup-java@v4
+        if: inputs.technology == 'maven'
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Prepare Java Bytecode for Static Analysis
+        if: inputs.technology == 'maven'
+        run: bash ./mvnw -B -Dmaven.test.skip=true package
+      - name: SonarQube Java Analysis
+        if: inputs.technology == 'maven'
+        uses: SonarSource/sonarqube-scan-action@v6
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
+        with:
+          args: >-
+            -Dsonar.projectKey=${{ steps.project.outputs.key }}
+            -Dsonar.sources=src/main/java
+            -Dsonar.tests=src/test/java
+            -Dsonar.java.binaries=target/classes
+            -Dsonar.java.libraries=/home/runner/.m2/repository/**/*.jar
+            -Dsonar.qualitygate.wait=false
+      - name: SonarQube JavaScript and TypeScript Analysis
+        if: inputs.technology == 'node'
+        uses: SonarSource/sonarqube-scan-action@v6
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
+        with:
+          args: >-
+            -Dsonar.projectKey=${{ steps.project.outputs.key }}
+            -Dsonar.sources=src
+            -Dsonar.exclusions=**/*.test.*,**/*.spec.*
+            -Dsonar.qualitygate.wait=false
+      - name: Publish Scanner Task Metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonar-task-${{ github.run_attempt }}
+          path: .scannerwork/report-task.txt
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+      - name: Record Actual Analysis Outcome
+        id: outcome
+        if: always()
+        env:
+          RAW_STATUS: ${{ job.status }}
+        run: |
+          echo "value=$RAW_STATUS" >> "$GITHUB_OUTPUT"
+          printf '### SonarQube scan\nExecution: **%s**. Quality Gate is evaluated separately.\n' "$RAW_STATUS" >> "$GITHUB_STEP_SUMMARY"
+  sonar_gate:
+    name: SonarQube - Quality Gate and Metrics
+    needs: [validation, sonar_analysis]
+    if: ${{ !cancelled() && needs.validation.result == 'success' && needs.sonar_analysis.outputs.outcome == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    outputs:
+      outcome: ${{ steps.outcome.outputs.value }}
+      gate: ${{ steps.gate.outputs.gate }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: sonar-task-${{ github.run_attempt }}
+          path: sonar-task
+      - name: Evaluate Quality Gate for This Analysis
+        id: gate
+        uses: Taller-SW-Web/github-actions/security-report@ce0ecc901f8c49a5a35ab2b88b483fc1736d85c1
+        with:
+          mode: sonar
+          sonar_host_url: ${{ inputs.sonar_host_url }}
+          sonar_token: ${{ secrets.SONAR_TOKEN }}
+      - name: Publish Quality Gate Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sonar-quality-gate-${{ github.run_attempt }}
+          path: sonar-quality-gate.json
+          retention-days: 14
+      - name: Record Actual Gate Outcome
+        id: outcome
+        if: always()
+        env:
+          RAW_STATUS: ${{ job.status }}
+        run: |
+          echo "value=$RAW_STATUS" >> "$GITHUB_OUTPUT"
+          printf '\nQuality Gate execution: **%s**. If no metrics were produced, inspect the API/configuration error in this job.\n' "$RAW_STATUS" >> "$GITHUB_STEP_SUMMARY"
+  ghas_sast:
+    name: GHAS - SAST / CodeQL (${{ inputs.language }})
+    needs: validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    outputs:
+      outcome: ${{ steps.outcome.outputs.value }}
+      high: ${{ steps.gate.outputs.high }}
+      critical: ${{ steps.gate.outputs.critical }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        if: inputs.technology == 'maven'
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Initialize Language-Specific CodeQL Analysis
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ needs.validation.outputs.codeql_language }}
+          build-mode: ${{ needs.validation.outputs.codeql_build_mode }}
+          queries: security-extended
+      - name: Extract Compiled Java Code
+        if: inputs.technology == 'maven'
+        run: bash ./mvnw -B -Dmaven.test.skip=true clean package
+      - name: Analyze and Publish Code Scanning Results
+        id: analyze
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: retail-pr-${{ inputs.language }}
+          output: codeql-results
+          upload: always
+          wait-for-processing: true
+      - name: Evaluate High and Critical Security Findings
+        id: gate
+        if: ${{ !cancelled() && steps.analyze.outcome == 'success' }}
+        uses: Taller-SW-Web/github-actions/security-report@ce0ecc901f8c49a5a35ab2b88b483fc1736d85c1
+        with:
+          mode: sarif
+      - name: Publish SARIF and Severity Summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghas-sast-${{ inputs.language }}-${{ github.run_attempt }}
+          path: codeql-results/
+          retention-days: 14
+      - name: Record Actual SAST Outcome
+        id: outcome
+        if: always()
+        env:
+          RAW_STATUS: ${{ job.status }}
+        run: |
+          echo "value=$RAW_STATUS" >> "$GITHUB_OUTPUT"
+          printf '\nGHAS SAST execution: **%s**. SARIF, when generated, is attached to this run.\n' "$RAW_STATUS" >> "$GITHUB_STEP_SUMMARY"
+  ghas_sca:
+    name: GHAS - SCA / Dependency Review
+    needs: validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    outputs:
+      outcome: ${{ steps.outcome.outputs.value }}
+      vulnerabilities: ${{ steps.export.outputs.vulnerabilities }}
+    steps:
+      - name: Review Dependency Changes and Vulnerabilities
+        id: review
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: never
+          show-patched-versions: true
+      - name: Export Dependency Findings
+        id: export
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          DEPENDENCY_CHANGES: ${{ steps.review.outputs.dependency-changes }}
+          VULNERABLE_CHANGES: ${{ steps.review.outputs.vulnerable-changes }}
+          REVIEW_OUTCOME: ${{ steps.review.outcome }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            const parse = value => value ? JSON.parse(value) : null;
+            const report = { outcome: process.env.REVIEW_OUTCOME,
+              changes: parse(process.env.DEPENDENCY_CHANGES), vulnerabilities: parse(process.env.VULNERABLE_CHANGES) };
+            fs.writeFileSync('dependency-review.json', JSON.stringify(report, null, 2));
+            if (Array.isArray(report.vulnerabilities)) core.setOutput('vulnerabilities', report.vulnerabilities.length);
+            await core.summary.addHeading('GHAS SCA · Dependency Review')
+              .addRaw(`Execution: ${report.outcome}. Policy: high/critical introduced vulnerabilities. Full details: dependency-review.json artifact.\n`).write();
+      - name: Publish Dependency Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ghas-sca-${{ github.run_attempt }}
+          path: dependency-review.json
+          retention-days: 14
+      - name: Record Actual SCA Outcome
+        id: outcome
+        if: always()
+        env:
+          RAW_STATUS: ${{ job.status }}
+        run: echo "value=$RAW_STATUS" >> "$GITHUB_OUTPUT"
+  status:
+    name: Security Policy Result
+    needs: [validation, sonar_analysis, sonar_gate, ghas_sast, ghas_sca]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Publish Actions Summary and Update PR Comment
+        uses: Taller-SW-Web/github-actions/security-report@ce0ecc901f8c49a5a35ab2b88b483fc1736d85c1
+        with:
+          mode: pull-request
+          results: ${{ toJSON(needs) }}
+          technology: ${{ inputs.technology }}
+          language: ${{ inputs.language }}
+          sonar_host_url: ${{ inputs.sonar_host_url }}
+      - name: Publish Consolidated Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-security-report-${{ github.run_attempt }}
+          path: pr-security-report.md
+          retention-days: 14

@@ -1,0 +1,174 @@
+name: Continuous Integration and Quality Analysis
+on:
+  workflow_call:
+    inputs:
+      component_name:
+        required: true
+        type: string
+      technology:
+        required: true
+        type: string
+      source_sha:
+        type: string
+        default: ''
+      sonar_host_url:
+        required: true
+        type: string
+    secrets:
+      SONAR_TOKEN:
+        required: false
+permissions:
+  contents: read
+jobs:
+  validation:
+    name: Validate Analysis Policy
+    runs-on: ubuntu-latest
+    outputs:
+      blocking: ${{ steps.policy.outputs.blocking }}
+      sonar: ${{ steps.policy.outputs.sonar }}
+      dependency_review: ${{ steps.policy.outputs.dependency_review }}
+    steps:
+      - uses: Taller-SW-Web/github-actions/analysis-validator@ce0ecc901f8c49a5a35ab2b88b483fc1736d85c1
+        id: policy
+        with:
+          technology: ${{ inputs.technology }}
+  build:
+    name: Build and Unit Tests
+    needs: validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        if: inputs.technology == 'maven'
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Verify Maven Application
+        if: inputs.technology == 'maven'
+        run: bash ./mvnw -B verify
+      - uses: actions/setup-node@v4
+        if: inputs.technology == 'node'
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Verify Node Application
+        if: inputs.technology == 'node'
+        run: |
+          npm ci
+          npm test
+          npm run build
+      - name: Publish Test Reports
+        if: always() && inputs.technology == 'maven'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-reports
+          path: target/surefire-reports/
+          retention-days: 14
+  sonar:
+    name: SonarQube Quality Gate
+    needs: [validation, build]
+    if: needs.validation.outputs.sonar == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: ${{ needs.validation.outputs.blocking != 'true' }}
+    steps:
+      - name: Derive SonarQube Project Key
+        id: project
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const key = `${context.repo.owner}_${context.repo.repo}`;
+            core.setOutput('project_key', key);
+            await core.summary.addHeading('SonarQube project').addRaw(`Project key: ${key}`).write();
+      - name: Validate SonarQube Configuration
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
+          SONAR_PROJECT_KEY: ${{ steps.project.outputs.project_key }}
+        run: |
+          test -n "$SONAR_TOKEN" || { echo '::error::Missing SONAR_TOKEN'; exit 1; }
+          test -n "$SONAR_HOST_URL" || { echo '::error::Missing SONAR_HOST_URL'; exit 1; }
+          test -n "$SONAR_PROJECT_KEY" || { echo '::error::Missing SONAR_PROJECT_KEY'; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        if: inputs.technology == 'maven'
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Prepare Java Bytecode
+        if: inputs.technology == 'maven'
+        run: bash ./mvnw -B -DskipTests package
+      - name: Analyze Java with SonarQube
+        if: inputs.technology == 'maven'
+        uses: SonarSource/sonarqube-scan-action@v6
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
+        with:
+          args: >-
+            -Dsonar.projectKey=${{ steps.project.outputs.project_key }}
+            -Dsonar.sources=src/main/java
+            -Dsonar.tests=src/test/java
+            -Dsonar.java.binaries=target/classes
+            -Dsonar.java.libraries=/home/runner/.m2/repository/**/*.jar
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=600
+      - name: Analyze TypeScript with SonarQube
+        if: inputs.technology == 'node'
+        uses: SonarSource/sonarqube-scan-action@v6
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
+        with:
+          args: >-
+            -Dsonar.projectKey=${{ steps.project.outputs.project_key }}
+            -Dsonar.sources=src
+            -Dsonar.exclusions=**/*.test.*,**/*.spec.*
+            -Dsonar.qualitygate.wait=true
+            -Dsonar.qualitygate.timeout=600
+  dependencies:
+    name: Dependency Vulnerability Review
+    needs: validation
+    if: needs.validation.outputs.dependency_review == 'true'
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ needs.validation.outputs.blocking != 'true' }}
+    steps:
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+  status:
+    name: Quality Policy Result
+    needs: [validation, build, sonar, dependencies]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        with:
+          script: |
+            const n = JSON.parse(process.env.RESULTS);
+            await core.summary.addHeading('CI results').addTable([
+              ['Stage', 'Result'], ...Object.entries(n).map(([key, value]) => [key, value.result])
+            ]).write();
+            if (n.validation.result !== 'success' || n.build.result !== 'success') {
+              core.setFailed('Validation, compilation and tests are mandatory.');
+            }
+            if (n.validation.outputs.blocking === 'true') {
+              if (n.sonar.result !== 'success' ||
+                  (n.validation.outputs.dependency_review === 'true' && n.dependencies.result !== 'success')) {
+                core.setFailed('Mandatory analysis did not pass.');
+              }
+            } else {
+              core.notice('Analysis is advisory for develop; inspect the analysis jobs for findings.');
+            }
