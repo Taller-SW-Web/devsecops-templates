@@ -6,21 +6,26 @@ Repositorio central para gobernar CI/CD. Contiene workflows reutilizables (reusa
 
 ### `cd-railway.yml` — Deploy a Railway
 
-Dispara un redeploy en Railway via deploy hook (webhook).
+Despliega a Railway usando la CLI oficial + Project Token. No requiere deploy hooks.
 
 **Secrets requeridos en el repo que llama:**
 
 | Secret | Descripcion |
 |--------|-------------|
-| `RAILWAY_DEPLOY_HOOK_URL` | URL del deploy hook del servicio en Railway (Settings > Deploy Hooks) |
+| `RAILWAY_TOKEN` | Project Token de Railway (`rlwy_proj_...`). Se genera en el dashboard de Railway > proyecto > Settings > Tokens. |
+
+**Secrets opcionales:**
+
+| Secret | Descripcion |
+|--------|-------------|
+| `RAILWAY_SERVICE` | Nombre del servicio en Railway (alternativa al input `service`) |
 
 **Inputs opcionales:**
 
 | Input | Default | Descripcion |
 |-------|---------|-------------|
 | `environment` | `production` | Nombre del environment de GitHub |
-| `wait-for-healthy` | `120` | Segundos de espera antes de verificar health check |
-| `health-url` | `""` | URL del health check (vacia = no verificar) |
+| `service` | `""` | Nombre del servicio en Railway (tiene prioridad sobre el secret `RAILWAY_SERVICE`) |
 
 **Ejemplo de uso:**
 
@@ -30,7 +35,8 @@ deploy:
   with:
     environment: production
   secrets:
-    RAILWAY_DEPLOY_HOOK_URL: ${{ secrets.RAILWAY_DEPLOY_HOOK_URL }}
+    RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
+    RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
 ```
 
 ---
@@ -75,8 +81,9 @@ Los secrets se configuran en cada repo de producto: **Settings > Secrets and var
 
 ### Para el backend (Railway)
 
-1. En Railway, ir al servicio > Settings > Deploy Hooks > crear un hook.
-2. Copiar la URL y guardarla como `RAILWAY_DEPLOY_HOOK_URL` en los secrets del repo de backend.
+1. En Railway, ir al proyecto > Settings > Tokens > generar un Project Token.
+2. Guardar el token (`rlwy_proj_...`) como `RAILWAY_TOKEN` en los secrets del repo de backend.
+3. Guardar el nombre del servicio como `RAILWAY_SERVICE` (como secret o como variable de repositorio).
 
 ### Para el frontend (Vercel)
 

@@ -1,7 +1,8 @@
-# Template reutilizable: CD a Railway via deploy hook.
+# Template reutilizable: CD a Railway via Railway CLI + Project Token.
 # Se invoca desde repos que despliegan su backend en Railway.
 # Requisitos en el repo que llama:
-#   - Secret RAILWAY_DEPLOY_HOOK_URL (webhook de redeploy del servicio en Railway)
+#   - Secret RAILWAY_TOKEN    (Project Token generado en Railway)
+#   - Variable RAILWAY_SERVICE (nombre del servicio en el proyecto de Railway)
 name: CD Railway (template)
 
 on:
@@ -12,20 +13,21 @@ on:
         required: false
         type: string
         default: production
-      wait-for-healthy:
-        description: "Segundos a esperar para verificar el health check despues del deploy"
-        required: false
-        type: number
-        default: 120
-      health-url:
-        description: "URL del health check (vacia = no verificar)"
+      service:
+        description: "Nombre del servicio en Railway (alternativa a la variable RAILWAY_SERVICE)"
         required: false
         type: string
         default: ""
     secrets:
-      RAILWAY_DEPLOY_HOOK_URL:
-        description: "Webhook URL de Railway para disparar el redeploy"
+      RAILWAY_TOKEN:
+        description: "Project Token de Railway (rlwy_proj_...)"
         required: true
+      RAILWAY_SERVICE:
+        description: "Nombre del servicio en Railway (si no se pasa como input)"
+        required: false
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
@@ -33,30 +35,22 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     steps:
-      - name: Disparar redeploy en Railway
-        run: |
-          echo "::group::Disparando deploy hook de Railway"
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${{ secrets.RAILWAY_DEPLOY_HOOK_URL }}")
-          echo "HTTP status: $HTTP_STATUS"
-          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
-            echo "::error::Railway respondio con HTTP $HTTP_STATUS"
-            exit 1
-          fi
-          echo "Deploy disparado exitosamente"
-          echo "::endgroup::"
+      - name: Descargar el codigo
+        uses: actions/checkout@v4
 
-      - name: Esperar y verificar health check
-        if: inputs.health-url != ''
+      - name: Instalar Railway CLI
+        run: npm install -g @railway/cli
+
+      - name: Deploy a Railway
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
         run: |
-          echo "Esperando ${{ inputs.wait-for-healthy }}s para que Railway levante el servicio..."
-          sleep ${{ inputs.wait-for-healthy }}
-          echo "::group::Verificando health check"
-          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 30 "${{ inputs.health-url }}")
-          echo "Health check HTTP status: $HTTP_STATUS"
-          if [ "$HTTP_STATUS" -lt 200 ] || [ "$HTTP_STATUS" -ge 300 ]; then
-            echo "::warning::Health check respondio con HTTP $HTTP_STATUS (el servicio puede estar aun levantando)"
+          SERVICE="${{ inputs.service || secrets.RAILWAY_SERVICE }}"
+          echo "::group::Desplegando servicio: $SERVICE"
+          if [ -n "$SERVICE" ]; then
+            railway up --ci --service "$SERVICE"
           else
-            echo "Servicio saludable"
+            railway up --ci
           fi
+          echo "Deploy completado exitosamente"
           echo "::endgroup::"
-
