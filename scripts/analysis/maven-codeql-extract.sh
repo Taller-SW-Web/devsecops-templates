@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-./mvnw -B -Dmaven.test.skip=true clean package
+bash ./mvnw -B -Dmaven.test.skip=true clean package

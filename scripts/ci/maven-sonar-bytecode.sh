@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-./mvnw -B -DskipTests package
+bash ./mvnw -B -DskipTests package
