@@ -6,7 +6,8 @@ VITEST_VERSION="$(node -p "require('./node_modules/vitest/package.json').version
 CURRENT_TEMP="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 COVERAGE_PREFIX="${CURRENT_TEMP%/}/vitest-coverage-provider"
 mkdir -p "$COVERAGE_PREFIX"
-npm install --prefix "$COVERAGE_PREFIX" --no-save --package-lock=false \
+printf '{"name":"vitest-coverage-provider","version":"1.0.0","private":true}\n' > "$COVERAGE_PREFIX/package.json"
+npm install --prefix "$COVERAGE_PREFIX" --save-exact --legacy-peer-deps \
   "@vitest/coverage-v8@${VITEST_VERSION}"
 mkdir -p node_modules/@vitest
 ln -s "$COVERAGE_PREFIX/node_modules/@vitest/coverage-v8" node_modules/@vitest/coverage-v8
