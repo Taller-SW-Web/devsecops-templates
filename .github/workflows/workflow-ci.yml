@@ -32,7 +32,7 @@ jobs:
       sonar: ${{ steps.policy.outputs.sonar }}
       dependency_review: ${{ steps.policy.outputs.dependency_review }}
     steps:
-      - uses: Taller-SW-Web/github-actions/analysis-validator@ce0ecc901f8c49a5a35ab2b88b483fc1736d85c1
+      - uses: Taller-SW-Web/github-actions/analysis-validator@main
         id: policy
         with:
           technology: ${{ inputs.technology }}

@@ -53,7 +53,7 @@ jobs:
       source_sha: ${{ steps.authorization.outputs.source_sha }}
     steps:
       - name: Verify Actor Team Membership
-        uses: Taller-SW-Web/github-actions/deployment-validator@ce0ecc901f8c49a5a35ab2b88b483fc1736d85c1
+        uses: Taller-SW-Web/github-actions/deployment-validator@main
         id: authorization
         with:
           rollback: ${{ inputs.rollback }}

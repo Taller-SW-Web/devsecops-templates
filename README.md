@@ -115,15 +115,9 @@ Se resuelve el tag a un SHA y ese SHA se usa en checkout; mover el tag despues d
 
 La comprobacion HTTP verifica disponibilidad, no identidad de la version; la confirmacion de version depende de que la CLI complete el deploy. Railway se ejecuta en modo adjunto, sin --ci (este ultimo puede terminar tras build). Configurar healthchecks tambien en el proveedor. Los CLIs se instalan desde npm; para reproducibilidad completa fijar sus versiones aprobadas.
 
-## Publicacion cuando se autorice
+## Publicacion
 
-1. Publicar github-actions en main y obtener el SHA real del commit.
-2. Sustituir todas las referencias `Taller-SW-Web/github-actions/...@main` en templates por ese SHA; publicar templates en main y obtener su SHA.
-3. Sustituir en los seis callers `devsecops-templates/...@main` por ese SHA real y publicar ambos consumidores en main. Esta ultima operacion inicia CD real.
-4. Revisar los runs y seleccionar el required check en las reglas de main. Probar un PR hacia develop y otro desde develop hacia main, y luego un rollback autorizado y uno denegado.
-
-Hasta publicar, las referencias @main mantienen el contrato previsto, pero el remoto aun contiene la version anterior. No inventar SHAs ni ejecutar callers nuevos contra templates viejos.
-
+Los callers consumen los workflows reutilizables con `@main`; los templates consumen las acciones compartidas con `@main`. Al publicar cambios en `github-actions` o `devsecops-templates`, los callers recibirán la versión vigente de esas ramas.
 ## Referencias
 
 - [GitHub: membresia de equipos y permisos del token](https://docs.github.com/en/rest/teams/members)

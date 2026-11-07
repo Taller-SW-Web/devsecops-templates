@@ -41,7 +41,7 @@ jobs:
         run: |
           test "$EVENT_NAME" = pull_request
           test -n "$LANGUAGE"
-      - uses: Taller-SW-Web/github-actions/analysis-validator@ce0ecc901f8c49a5a35ab2b88b483fc1736d85c1
+      - uses: Taller-SW-Web/github-actions/analysis-validator@main
         id: policy
         with:
           technology: ${{ inputs.technology }}
@@ -152,7 +152,7 @@ jobs:
           path: sonar-task
       - name: Evaluate Quality Gate for This Analysis
         id: gate
-        uses: Taller-SW-Web/github-actions/security-report@ce0ecc901f8c49a5a35ab2b88b483fc1736d85c1
+        uses: Taller-SW-Web/github-actions/security-report@main
         with:
           mode: sonar
           sonar_host_url: ${{ inputs.sonar_host_url }}
@@ -216,7 +216,7 @@ jobs:
       - name: Evaluate High and Critical Security Findings
         id: gate
         if: ${{ !cancelled() && steps.analyze.outcome == 'success' }}
-        uses: Taller-SW-Web/github-actions/security-report@ce0ecc901f8c49a5a35ab2b88b483fc1736d85c1
+        uses: Taller-SW-Web/github-actions/security-report@main
         with:
           mode: sarif
       - name: Publish SARIF and Severity Summary
@@ -292,7 +292,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Publish Actions Summary and Update PR Comment
-        uses: Taller-SW-Web/github-actions/security-report@ce0ecc901f8c49a5a35ab2b88b483fc1736d85c1
+        uses: Taller-SW-Web/github-actions/security-report@main
         with:
           mode: pull-request
           results: ${{ toJSON(needs) }}
