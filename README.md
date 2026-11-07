@@ -26,8 +26,8 @@ Los cuatro templates anteriores se reemplazan por tres orquestadores (PR, CI y C
 
 | Contexto | Build/tests | SonarQube | GHAS SAST / SCA |
 |---|---|---|---|
-| PR feature -> develop | No ejecuta unit tests; Java compila para los analizadores | Informativo | Informativos |
-| PR develop -> main | No ejecuta unit tests; Java compila para los analizadores | Obligatorio | Obligatorios |
+| PR feature -> develop | Tests ejecutados en Sonar para generar JaCoCo/LCOV | Informativo | Informativos |
+| PR develop -> main | Tests y cobertura ejecutados en Sonar | Obligatorio | Obligatorios |
 | Push develop | Obligatorios en workflow-develop | Informativo en CI | Se evaluan en el PR |
 | Push main / dispatch normal desde main | Obligatorios en CD | Obligatorio en CI | Se exige revision en el PR protegido |
 | Rollback autorizado desde main | Reconstruye la version seleccionada | No repite gate historico | No repite analisis de PR |
@@ -41,7 +41,7 @@ Se mantienen analizadores independientes en paralelo despues de `validation`, co
 | Job | Implementacion y reporte | Condicion |
 |---|---|---|
 | `validation` | Mapa tecnologia/lenguaje y politica de rama | Contexto valido y combinacion soportada |
-| `sonar_analysis` | SonarQube SAST y calidad; bytecode Java o fuentes JS/TS | Escaneo y metadata generados |
+| `sonar_analysis` | Ejecuta tests, genera JaCoCo/LCOV y analiza bytecode Java o fuentes JS/TS | Reporte importado y metadata generados |
 | `sonar_gate` | Consulta tarea, espera computo y obtiene condiciones/metricas; JSON y tabla | Quality Gate exactamente `OK` |
 | `ghas_sast` | CodeQL security-extended, SARIF, resumen de severidades y Code Scanning | Sin hallazgos high/critical (security-severity >= 7) en las fuentes analizadas |
 | `ghas_sca` | Dependency Review, reporte de dependencias y versiones corregidas | Sin vulnerabilidades nuevas high/critical en cambios de dependencias |
@@ -51,7 +51,7 @@ CodeQL no falla simplemente por encontrar vulnerabilidades: la accion compartida
 
 Dependency Review analiza la diferencia de dependencias del PR a partir de dependency graph. No es un escaneo completo de todas las dependencias desplegadas. Requiere dependency graph habilitado y manifiestos/lockfiles reconocidos. Para cubrir dependencias Maven resueltas/transitivas que no esten en el grafo, habilitar dependency submission y asegurar snapshots de base y head; este flujo no inventa esos snapshots ni ejecuta codigo de PR con un token elevado. No se ha impuesto una lista arbitraria de licencias prohibidas: eso requiere una politica del equipo.
 
-SonarQube aporta SAST, fiabilidad, mantenibilidad, duplicacion y revision de security hotspots segun las reglas y el Quality Gate configurados. Un hotspot requiere revision humana; no equivale automaticamente a una vulnerabilidad confirmada. No se genera cobertura en el flujo PR, por lo que un gate que exija cobertura sin reportes fallara: configurar un gate de seguridad/calidad acorde o incorporar JaCoCo/LCOV posteriormente. No se elimina una condicion de cobertura automaticamente. No se duplica SCA en Sonar: la disponibilidad y licencia de esa funcion dependen del producto, y GHAS ya cubre el control definido aqui.
+SonarQube aporta SAST, fiabilidad, mantenibilidad, duplicacion, cobertura de nuevo codigo y revision de security hotspots segun las reglas y el Quality Gate configurados. Un hotspot requiere revision humana; no equivale automaticamente a una vulnerabilidad confirmada. El job `sonar_analysis` ejecuta los tests antes del escaneo: JaCoCo genera XML para Maven y Vitest genera LCOV para Node/TypeScript. Para Vitest, el template instala temporalmente el proveedor V8 de la misma version que Vitest, sin modificar el lockfile. Si faltan tests, falla su ejecucion o no se genera el reporte, Sonar no puede presentar cobertura como aprobada. No se duplica SCA en Sonar: la disponibilidad y licencia de esa funcion dependen del producto, y GHAS ya cubre el control definido aqui.
 
 No se agrega DAST sin una aplicacion desplegada de prueba. Secret scanning/push protection se configuran en GitHub (GitHub Secret Protection cuando aplique), no se representan como un job que el YAML no puede ejecutar.
 
@@ -61,11 +61,11 @@ El caller de PR pasa `technology` y `language`; no hay comandos de build ni pipe
 
 | Componente | technology | language | CodeQL | Extraccion |
 |---|---|---|---|---|
-| Backend | maven | java | java-kotlin | manual: Maven compila sin ejecutar tests |
+| Backend | maven | java | java-kotlin | manual: CodeQL compila sin ejecutar tests; Sonar ejecuta tests con JaCoCo |
 | Frontend | node | typescript | javascript-typescript | none: analiza fuentes sin build |
 | Otro proyecto Node admitido | node | javascript | javascript-typescript | none |
 
-Solo se admiten estas combinaciones probadas. Kotlin, Python, .NET, etc. requieren ampliar explicitamente el contrato y preparar su build, sin tratarlos por defecto como Java/Node. SonarQube detecta lenguajes en las fuentes; la tecnologia determina preparacion y rutas. Java usa bytecode y dependencias, mientras JavaScript/TypeScript no necesita ejecutar unit tests para analizarse. Se conserva la clave Sonar derivada `<organizacion>_<repositorio>`.
+Solo se admiten estas combinaciones probadas. Kotlin, Python, .NET, etc. requieren ampliar explicitamente el contrato y preparar su build, sin tratarlos por defecto como Java/Node. SonarQube detecta lenguajes en las fuentes; la tecnologia determina preparacion y rutas. CodeQL Java usa bytecode; el escaneo Sonar ejecuta tests en ambos stacks para importar cobertura. Se conserva la clave Sonar derivada `<organizacion>_<repositorio>`.
 
 ### Reportes en Actions y PR
 
