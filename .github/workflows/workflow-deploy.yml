@@ -90,10 +90,30 @@ jobs:
     if: ${{ !cancelled() && needs.validation.result == 'success' && (needs.integration.result == 'success' || (inputs.rollback && needs.integration.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
     steps:
+      - name: Create Production Release Tag
+        id: release
+        if: inputs.rollback == false
+        uses: actions/github-script@v7
+        env:
+          SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
+        with:
+          script: |
+            const tag = `production-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
+            const { data } = await github.rest.git.createTag({
+              ...context.repo, tag, message: `Production deployment ${context.runId}`, type: 'commit',
+              object: process.env.SOURCE_SHA
+            });
+            await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${tag}`, sha: data.sha });
+            core.setOutput('tag', tag);
+            await core.summary.addHeading('Production release tag')
+              .addRaw(`Tag created before deployment: ${tag}\n`).write();
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validation.outputs.source_sha }}
+          ref: ${{ inputs.rollback && inputs.release_tag || steps.release.outputs.tag }}
           persist-credentials: false
       - name: Checkout Shared Shell Scripts
         uses: actions/checkout@v4
@@ -126,25 +146,5 @@ jobs:
         env:
           SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
           ROLLBACK: ${{ inputs.rollback }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_TAG: ${{ inputs.rollback && inputs.release_tag || steps.release.outputs.tag }}
         run: bash .devsecops-templates/scripts/deploy/write-deployment-summary.sh
-  release:
-    name: Create Production Release Tag
-    needs: [validation, deployment]
-    if: ${{ !cancelled() && needs.deployment.result == 'success' && !inputs.rollback }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/github-script@v7
-        env:
-          SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
-        with:
-          script: |
-            const tag = `production-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
-            const { data } = await github.rest.git.createTag({
-              ...context.repo, tag, message: `Production deployment ${context.runId}`, type: 'commit',
-              object: process.env.SOURCE_SHA
-            });
-            await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${tag}`, sha: data.sha });
-            await core.summary.addHeading('Production release').addRaw(`Tag: ${tag}\n`).write();
