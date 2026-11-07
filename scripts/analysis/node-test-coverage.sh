@@ -11,6 +11,9 @@ npm install --prefix "$COVERAGE_PREFIX" --save-exact --legacy-peer-deps \
   "@vitest/coverage-v8@${VITEST_VERSION}"
 mkdir -p node_modules/@vitest
 ln -s "$COVERAGE_PREFIX/node_modules/@vitest/coverage-v8" node_modules/@vitest/coverage-v8
+if [ ! -e "$COVERAGE_PREFIX/node_modules/vitest" ]; then
+  ln -s "$PWD/node_modules/vitest" "$COVERAGE_PREFIX/node_modules/vitest"
+fi
 npm test -- --coverage --coverage.reporter=lcov '--coverage.include=src/**/*.{ts,tsx}'
 
 test -s coverage/lcov.info || {
