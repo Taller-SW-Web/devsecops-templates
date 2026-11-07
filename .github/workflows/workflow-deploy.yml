@@ -57,7 +57,7 @@ jobs:
         id: authorization
         with:
           rollback: ${{ inputs.rollback }}
-          release_tag: ${{ inputs.release_tag }}
+          release_tag: ${{ inputs.release_tag || (inputs.rollback && github.ref_type == 'tag' && github.ref_name) || '' }}
           token: ${{ secrets.GH_TOKEN_G4 || github.token }}
       - name: Checkout Shared Shell Scripts
         uses: actions/checkout@v4
@@ -113,7 +113,7 @@ jobs:
               .addRaw(`Tag created before deployment: ${tag}\n`).write();
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.rollback && inputs.release_tag || steps.release.outputs.tag }}
+          ref: ${{ inputs.rollback && (inputs.release_tag || (github.ref_type == 'tag' && github.ref_name)) || steps.release.outputs.tag }}
           persist-credentials: false
       - name: Checkout Shared Shell Scripts
         uses: actions/checkout@v4
@@ -146,5 +146,5 @@ jobs:
         env:
           SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
           ROLLBACK: ${{ inputs.rollback }}
-          RELEASE_TAG: ${{ inputs.rollback && inputs.release_tag || steps.release.outputs.tag }}
+          RELEASE_TAG: ${{ inputs.rollback && (inputs.release_tag || (github.ref_type == 'tag' && github.ref_name)) || steps.release.outputs.tag }}
         run: bash .devsecops-templates/scripts/deploy/write-deployment-summary.sh
