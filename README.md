@@ -5,7 +5,6 @@ Los callers consumen las acciones y plantillas compartidas mediante `@main`. Los
 
 Los pasos Bash reutilizados viven en `scripts/` como archivos `.sh`; los workflows obtienen ese directorio con un checkout adicional de este repositorio en `.devsecops-templates/`. Los bloques JavaScript que usan `actions/github-script` se mantienen en sus acciones porque usan el contexto y la API de GitHub Actions.
 
-**Excepción temporal de cobertura en PR:** el Quality Gate acepta un resultado fallido solo si todas sus condiciones fallidas son de cobertura. La excepción se muestra en el resumen, artefacto y comentario. Retirarla cuando backend JaCoCo y frontend LCOV estén configurados; cualquier fallo distinto de cobertura sigue bloqueando `main`.
 
 ## Archivos por repositorio
 

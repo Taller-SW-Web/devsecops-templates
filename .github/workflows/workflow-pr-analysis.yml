@@ -156,7 +156,6 @@ jobs:
     outputs:
       outcome: ${{ steps.outcome.outputs.value }}
       gate: ${{ steps.gate.outputs.gate }}
-      coverage_exception: ${{ steps.gate.outputs.coverage_exception }}
     steps:
       - name: Checkout Shared Shell Scripts
         uses: actions/checkout@v4
@@ -176,7 +175,6 @@ jobs:
           mode: sonar
           sonar_host_url: ${{ inputs.sonar_host_url }}
           sonar_token: ${{ secrets.SONAR_TOKEN }}
-          ignore_coverage_failure: 'true'
       - name: Publish Quality Gate Report
         if: always()
         uses: actions/upload-artifact@v4
