@@ -1,0 +1,126 @@
+# ---------------------------------------------------------------------------
+# Template reutilizable: Integracion Continua para proyectos Java + Maven.
+# Orquesta validacion de contexto, compilacion, tests unitarios, empaquetado
+# y publicacion de artefactos y reportes.
+#
+# Contrato de inputs:
+#   component_name  (required) — Nombre del componente/microservicio
+#   java_version    (optional) — Version de Java (default: '21')
+#   maven_goals     (optional) — Goals de Maven (default: 'verify')
+# ---------------------------------------------------------------------------
+name: "Template: CI Maven"
+
+on:
+  workflow_call:
+    inputs:
+      component_name:
+        description: "Nombre del componente (ej: ms-retail-backend)"
+        required: true
+        type: string
+      java_version:
+        description: "Version de Java/JDK"
+        required: false
+        type: string
+        default: "21"
+      maven_goals:
+        description: "Goals de Maven a ejecutar"
+        required: false
+        type: string
+        default: "verify"
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Job 1: Validacion de contexto ────────────────────────────────────────
+  validation:
+    name: "Validar contexto de ${{ inputs.component_name }}"
+    runs-on: ubuntu-latest
+    outputs:
+      commit_sha_short: ${{ steps.context.outputs.sha_short }}
+      branch_name: ${{ steps.context.outputs.branch }}
+      build_timestamp: ${{ steps.context.outputs.timestamp }}
+    steps:
+      - name: Obtener metadatos del contexto
+        id: context
+        run: |
+          echo "sha_short=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "branch=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "timestamp=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
+      - name: Resumen del componente
+        run: |
+          echo "### Contexto de ejecucion" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Propiedad | Valor |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-----------|-------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Componente** | \`${{ inputs.component_name }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Commit** | \`${GITHUB_SHA::7}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Rama** | \`${GITHUB_REF_NAME}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Actor** | \`${GITHUB_ACTOR}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Evento** | \`${GITHUB_EVENT_NAME}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Java** | \`${{ inputs.java_version }}\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **Maven goals** | \`${{ inputs.maven_goals }}\` |" >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Job 2: Compilacion, tests y empaquetado ──────────────────────────────
+  build-and-test:
+    name: "Build y tests de ${{ inputs.component_name }}"
+    runs-on: ubuntu-latest
+    needs: validation
+    steps:
+      - name: Checkout del codigo fuente
+        uses: actions/checkout@v4
+
+      - name: Configurar JDK ${{ inputs.java_version }} (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java_version }}
+          cache: maven
+
+      - name: Otorgar permisos al wrapper de Maven
+        run: chmod +x mvnw
+
+      - name: Compilar y ejecutar tests unitarios
+        run: ./mvnw -B ${{ inputs.maven_goals }}
+
+      - name: Publicar reporte de tests (Surefire)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-${{ needs.validation.outputs.commit_sha_short }}
+          path: target/surefire-reports/
+          retention-days: 14
+
+      - name: Publicar artefacto JAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.component_name }}-${{ needs.validation.outputs.commit_sha_short }}.jar
+          path: target/*.jar
+          retention-days: 14
+
+  # ── Job 3: Resumen de resultados ─────────────────────────────────────────
+  status-check:
+    name: "Estado CI de ${{ inputs.component_name }}"
+    runs-on: ubuntu-latest
+    needs: [validation, build-and-test]
+    if: always()
+    steps:
+      - name: Evaluar resultado de la pipeline
+        run: |
+          if [ "${{ needs.build-and-test.result }}" != "success" ]; then
+            echo "::error::El job build-and-test finalizo con estado: ${{ needs.build-and-test.result }}"
+            exit 1
+          fi
+
+      - name: Publicar resumen de CI
+        if: success()
+        run: |
+          echo "### Resultado CI — ${{ inputs.component_name }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Etapa | Estado |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Validacion | :white_check_mark: ${{ needs.validation.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Build y tests | :white_check_mark: ${{ needs.build-and-test.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "> Commit \`${{ needs.validation.outputs.commit_sha_short }}\` en rama \`${{ needs.validation.outputs.branch_name }}\` — ${{ needs.validation.outputs.build_timestamp }}" >> "$GITHUB_STEP_SUMMARY"

@@ -1,93 +1,108 @@
 # devsecops-templates
 
-Repositorio central para gobernar CI/CD. Contiene workflows reutilizables (reusable workflows) de GitHub Actions que los repos de producto llaman con `workflow_call`.
+Repositorio central de gobernanza CI/CD para la organizacion Taller-SW-Web.
+Contiene workflows reutilizables (reusable workflows) de GitHub Actions que los
+repositorios de producto invocan mediante `workflow_call`.
+
+## Arquitectura
+
+```
+mic (caller)                    devsecops-templates (templates)
+┌──────────────────────┐        ┌──────────────────────────────────────┐
+│ workflow-pr.yml      │───────>│ workflow-ci-maven.yml                │
+│   - evento: PR/push  │        │   - validation                      │
+│   - with: datos      │        │   - build-and-test                  │
+│   - secrets          │        │   - status-check                    │
+└──────────────────────┘        ├──────────────────────────────────────┤
+┌──────────────────────┐        │ workflow-ci-node.yml                 │
+│ workflow-main.yml    │───────>│   - validation                      │
+│   - evento: push main│        │   - install                         │
+│   - with: datos      │        │   - test                            │
+│   - secrets          │        │   - build                           │
+│   - needs: ci→deploy │        │   - status-check                    │
+└──────────────────────┘        ├──────────────────────────────────────┤
+                                │ workflow-deploy-railway.yml          │
+                                │   - pre-deploy-validation           │
+                                │   - deploy (Railway CLI)            │
+                                │   - post-deploy-verification        │
+                                ├──────────────────────────────────────┤
+                                │ workflow-deploy-vercel.yml           │
+                                │   - pre-deploy-validation           │
+                                │   - deploy (Vercel CLI)             │
+                                │   - post-deploy-verification        │
+                                └──────────────────────────────────────┘
+```
+
+**Regla principal:** el repositorio del microservicio no implementa el pipeline.
+Solo declara cuando se ejecuta y llama al template, pasando datos con `with` y
+secretos con `secrets`. La orquestacion, runners y steps viven en los templates.
 
 ## Templates disponibles
 
-### `cd-railway.yml` — Deploy a Railway
+### `workflow-ci-maven.yml` — CI para Java + Maven
 
-Despliega a Railway usando la CLI oficial + Project Token. No requiere deploy hooks.
+Jobs: `validation` → `build-and-test` → `status-check`
 
-**Secrets requeridos en el repo que llama:**
+| Input | Requerido | Default | Descripcion |
+|-------|-----------|---------|-------------|
+| `component_name` | Si | — | Nombre del componente |
+| `java_version` | No | `21` | Version de Java |
+| `maven_goals` | No | `verify` | Goals de Maven |
 
-| Secret | Descripcion |
-|--------|-------------|
-| `RAILWAY_TOKEN` | Project Token de Railway (`rlwy_proj_...`). Se genera en el dashboard de Railway > proyecto > Settings > Tokens. |
+### `workflow-ci-node.yml` — CI para Node.js + Vite
 
-**Secrets opcionales:**
+Jobs: `validation` → `install` → `test` + `build` (paralelo) → `status-check`
 
-| Secret | Descripcion |
-|--------|-------------|
-| `RAILWAY_SERVICE` | Nombre del servicio en Railway (alternativa al input `service`) |
+| Input | Requerido | Default | Descripcion |
+|-------|-----------|---------|-------------|
+| `component_name` | Si | — | Nombre del componente |
+| `node_version` | No | `22` | Version de Node.js |
+| `build_env_vars` | No | `{}` | Variables de entorno para build |
 
-**Inputs opcionales:**
+### `workflow-deploy-railway.yml` — Deploy a Railway
 
-| Input | Default | Descripcion |
-|-------|---------|-------------|
-| `environment` | `production` | Nombre del environment de GitHub |
-| `service` | `""` | Nombre del servicio en Railway (tiene prioridad sobre el secret `RAILWAY_SERVICE`) |
+Jobs: `pre-deploy-validation` → `deploy` → `post-deploy-verification`
 
-**Ejemplo de uso:**
+| Input | Requerido | Default | Descripcion |
+|-------|-----------|---------|-------------|
+| `component_name` | Si | — | Nombre del componente |
+| `environment_name` | No | `production` | Environment de GitHub |
+| `service_name` | No | `""` | Nombre del servicio en Railway |
+| `java_version` | No | `21` | Version de Java |
 
-```yaml
-deploy:
-  uses: Taller-SW-Web/devsecops-templates/.github/workflows/cd-railway.yml@main
-  with:
-    environment: production
-  secrets:
-    RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-    RAILWAY_SERVICE: ${{ secrets.RAILWAY_SERVICE }}
-```
+| Secret | Requerido | Descripcion |
+|--------|-----------|-------------|
+| `RAILWAY_TOKEN` | Si | Project Token de Railway |
 
----
+### `workflow-deploy-vercel.yml` — Deploy a Vercel
 
-### `cd-vercel.yml` — Deploy a Vercel
+Jobs: `pre-deploy-validation` → `deploy` → `post-deploy-verification`
 
-Despliega a Vercel produccion usando la CLI oficial.
+| Input | Requerido | Default | Descripcion |
+|-------|-----------|---------|-------------|
+| `component_name` | Si | — | Nombre del componente |
+| `environment_name` | No | `production` | Environment de GitHub |
+| `node_version` | No | `22` | Version de Node.js |
 
-**Secrets requeridos en el repo que llama:**
+| Secret | Requerido | Descripcion |
+|--------|-----------|-------------|
+| `VERCEL_TOKEN` | Si | Token de la API de Vercel |
+| `VERCEL_ORG_ID` | Si | ID de la organizacion en Vercel |
+| `VERCEL_PROJECT_ID` | Si | ID del proyecto en Vercel |
 
-| Secret | Descripcion |
-|--------|-------------|
-| `VERCEL_TOKEN` | Token de la API de Vercel (vercel.com > Settings > Tokens) |
-| `VERCEL_ORG_ID` | ID de la organizacion/equipo en Vercel |
-| `VERCEL_PROJECT_ID` | ID del proyecto en Vercel |
+## Configuracion de secrets por repositorio
 
-**Inputs opcionales:**
+### G4-Retail-backend
 
-| Input | Default | Descripcion |
-|-------|---------|-------------|
-| `environment` | `production` | Nombre del environment de GitHub |
-| `node-version` | `22` | Version de Node.js |
-| `build-env` | `{}` | Variables de entorno extra para el build (JSON) |
+| Tipo | Nombre | Origen |
+|------|--------|--------|
+| Secret | `RAILWAY_TOKEN` | Railway > Proyecto > Settings > Tokens |
+| Variable | `RAILWAY_SERVICE` | Nombre del servicio en el dashboard de Railway |
 
-**Ejemplo de uso:**
+### G4-Retail-frontend
 
-```yaml
-deploy:
-  uses: Taller-SW-Web/devsecops-templates/.github/workflows/cd-vercel.yml@main
-  with:
-    environment: production
-    node-version: "22"
-  secrets:
-    VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-    VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
-    VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-```
-
-## Configuracion de secrets
-
-Los secrets se configuran en cada repo de producto: **Settings > Secrets and variables > Actions > New repository secret**.
-
-### Para el backend (Railway)
-
-1. En Railway, ir al proyecto > Settings > Tokens > generar un Project Token.
-2. Guardar el token (`rlwy_proj_...`) como `RAILWAY_TOKEN` en los secrets del repo de backend.
-3. Guardar el nombre del servicio como `RAILWAY_SERVICE` (como secret o como variable de repositorio).
-
-### Para el frontend (Vercel)
-
-1. En vercel.com > Settings > Tokens > crear un token.
-2. Guardar como `VERCEL_TOKEN` en los secrets del repo de frontend.
-3. Obtener `VERCEL_ORG_ID` y `VERCEL_PROJECT_ID` de la carpeta `.vercel/project.json` local (se genera al hacer `vercel link`) o desde Settings del proyecto en Vercel.
-4. Guardarlos como `VERCEL_ORG_ID` y `VERCEL_PROJECT_ID` en los secrets del repo de frontend.
+| Tipo | Nombre | Origen |
+|------|--------|--------|
+| Secret | `VERCEL_TOKEN` | vercel.com > Settings > Tokens |
+| Secret | `VERCEL_ORG_ID` | `.vercel/project.json` o Settings del proyecto |
+| Secret | `VERCEL_PROJECT_ID` | `.vercel/project.json` o Settings del proyecto |
