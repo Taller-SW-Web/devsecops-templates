@@ -51,6 +51,40 @@ jobs:
         with:
           technology: ${{ inputs.technology }}
           language: ${{ inputs.language }}
+  build_test:
+    name: Build and Unit Tests
+    needs: validation
+    if: needs.validation.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        if: inputs.technology == 'maven'
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - uses: actions/setup-node@v4
+        if: inputs.technology == 'node'
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Build and Test Maven Application
+        if: inputs.technology == 'maven'
+        run: bash .devsecops-templates/scripts/ci/maven-verify.sh
+      - name: Build and Test Node Application
+        if: inputs.technology == 'node'
+        run: bash .devsecops-templates/scripts/ci/run-node-checks.sh
   sonar_analysis:
     name: SonarQube - SAST and Code Quality
     needs: validation
@@ -326,7 +360,7 @@ jobs:
         run: bash .devsecops-templates/scripts/analysis/record-job-outcome.sh
   status:
     name: Security Policy Result
-    needs: [validation, sonar_analysis, sonar_gate, ghas_sast, ghas_sca]
+    needs: [validation, build_test, sonar_analysis, sonar_gate, ghas_sast, ghas_sca]
     if: always()
     runs-on: ubuntu-latest
     permissions:

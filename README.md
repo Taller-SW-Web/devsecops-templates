@@ -12,8 +12,7 @@ Los pasos Bash reutilizados viven en `scripts/` como archivos `.sh`; los workflo
 |---|---|---|
 | G4-Retail-backend y G4-Retail-frontend | `.github/workflows/workflow-pr.yml` | Eventos de PR; un solo job que llama al template de seguridad |
 | G4-Retail-backend y G4-Retail-frontend | `.github/workflows/workflow-main.yml` | Push main y dispatch con rollback/tag; un solo job que llama al template CD |
-| G4-Retail-backend y G4-Retail-frontend | `.github/workflows/workflow-develop.yml` | Conserva CI de build/tests al hacer push a develop |
-| devsecops-templates | `.github/workflows/workflow-pr-analysis.yml` | Validacion, Sonar scan/gate, GHAS SAST/SCA y reporte consolidado |
+| devsecops-templates | `.github/workflows/workflow-pr-analysis.yml` | Validacion, build/tests obligatorios, Sonar scan/gate, GHAS SAST/SCA y reporte consolidado |
 | devsecops-templates | `.github/workflows/workflow-ci.yml` | Validacion, compilacion, tests, SonarQube, dependencias y resultado |
 | devsecops-templates | `.github/workflows/workflow-deploy.yml` | Autorizacion, CI, despliegue, salud HTTP y tag |
 | github-actions | `analysis-validator/action.yml`, `policy.cjs` | Seleccion y obligatoriedad de analisis segun el evento real |
@@ -26,13 +25,12 @@ Los cuatro templates anteriores se reemplazan por tres orquestadores (PR, CI y C
 
 | Contexto | Build/tests | SonarQube | GHAS SAST / SCA |
 |---|---|---|---|
-| PR feature -> develop | Tests ejecutados en Sonar para generar JaCoCo/LCOV | Informativo | Informativos |
-| PR develop -> main | Tests y cobertura ejecutados en Sonar | Obligatorio | Obligatorios |
-| Push develop | Obligatorios en workflow-develop | Informativo en CI | Se evaluan en el PR |
+| PR feature -> develop | Obligatorios en el job Build and Unit Tests; tambien generan JaCoCo/LCOV para Sonar | Informativo | Informativos |
+| PR develop -> main | Obligatorios en el job Build and Unit Tests; tambien generan cobertura para Sonar | Obligatorio | Obligatorios |
 | Push main / dispatch normal desde main | Obligatorios en CD | Obligatorio en CI | Se exige revision en el PR protegido |
 | Rollback autorizado desde main | Reconstruye la version seleccionada | No repite gate historico | No repite analisis de PR |
 
-Los PR a main deben provenir de develop del mismo repositorio. Una rama de un fork llamada develop no puede promoverse a main. Los errores del analizador o la ausencia de reportes tambien bloquean main. Hacia develop se conserva el resultado real en summary/comentario y el check consolidado no bloquea por hallazgos. La validacion de contexto/lenguaje siempre es obligatoria.
+Los PR a main deben provenir de develop del mismo repositorio. Una rama de un fork llamada develop no puede promoverse a main. Los errores del analizador o la ausencia de reportes tambien bloquean main. Hacia develop build/tests bloquean si fallan; GHAS y Sonar conservan su resultado en summary/comentario, pero los hallazgos de seguridad son informativos. La validacion de contexto/lenguaje siempre es obligatoria.
 
 ## Analisis de PR: decisiones y alcance
 
