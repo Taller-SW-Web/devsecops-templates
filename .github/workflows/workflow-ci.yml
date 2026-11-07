@@ -126,9 +126,17 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
-      - name: Prepare Java Bytecode
+      - uses: actions/setup-node@v4
+        if: inputs.technology == 'node'
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Run Maven Tests and Generate JaCoCo Coverage
         if: inputs.technology == 'maven'
-        run: bash .devsecops-templates/scripts/ci/maven-sonar-bytecode.sh
+        run: bash .devsecops-templates/scripts/analysis/maven-test-coverage.sh
+      - name: Run Vitest and Generate LCOV Coverage
+        if: inputs.technology == 'node'
+        run: bash .devsecops-templates/scripts/analysis/node-test-coverage.sh
       - name: Analyze Java with SonarQube
         if: inputs.technology == 'maven'
         uses: SonarSource/sonarqube-scan-action@v6
@@ -143,6 +151,7 @@ jobs:
             -Dsonar.tests=src/test/java
             -Dsonar.java.binaries=target/classes
             -Dsonar.java.libraries=/home/runner/.m2/repository/**/*.jar
+            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
             -Dsonar.qualitygate.wait=true
             -Dsonar.qualitygate.timeout=600
       - name: Analyze TypeScript with SonarQube
@@ -157,6 +166,7 @@ jobs:
             -Dsonar.projectKey=${{ steps.project.outputs.project_key }}
             -Dsonar.sources=src
             -Dsonar.exclusions=**/*.test.*,**/*.spec.*
+            -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
             -Dsonar.qualitygate.wait=true
             -Dsonar.qualitygate.timeout=600
   dependencies:
