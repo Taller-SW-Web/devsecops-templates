@@ -26,37 +26,14 @@ on:
 permissions:
   contents: read
 jobs:
-  validation:
-    name: Validate Analysis Policy and Language
+  build_test:
+    name: Build, Unit Tests and Policy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     outputs:
       blocking: ${{ steps.policy.outputs.blocking }}
       codeql_language: ${{ steps.policy.outputs.codeql_language }}
       codeql_build_mode: ${{ steps.policy.outputs.codeql_build_mode }}
-    steps:
-      - name: Checkout Shared Shell Scripts
-        uses: actions/checkout@v4
-        with:
-          repository: Taller-SW-Web/devsecops-templates
-          ref: main
-          path: .devsecops-templates
-          persist-credentials: false
-      - name: Validate Pull Request Context
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          LANGUAGE: ${{ inputs.language }}
-        run: bash .devsecops-templates/scripts/analysis/validate-pr-context.sh
-      - uses: Taller-SW-Web/github-actions/analysis-validator@main
-        id: policy
-        with:
-          technology: ${{ inputs.technology }}
-          language: ${{ inputs.language }}
-  build_test:
-    name: Build and Unit Tests
-    needs: validation
-    if: needs.validation.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -68,6 +45,16 @@ jobs:
           ref: main
           path: .devsecops-templates
           persist-credentials: false
+      - name: Validate Analysis Context and Policy
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          LANGUAGE: ${{ inputs.language }}
+        run: bash .devsecops-templates/scripts/analysis/validate-pr-context.sh
+      - uses: Taller-SW-Web/github-actions/analysis-validator@main
+        id: policy
+        with:
+          technology: ${{ inputs.technology }}
+          language: ${{ inputs.language }}
       - uses: actions/setup-java@v4
         if: inputs.technology == 'maven'
         with:
@@ -79,15 +66,15 @@ jobs:
         with:
           node-version: '22.22.2'
           cache: npm
-      - name: Build y cobertura Maven
+      - name: Build and Coverage (Maven)
         if: inputs.technology == 'maven'
         run: bash .devsecops-templates/scripts/analysis/maven-test-coverage.sh
-      - name: Build and Test Node Application
+      - name: Build and Coverage (Node)
         if: inputs.technology == 'node'
         run: |
           bash .devsecops-templates/scripts/analysis/node-test-coverage.sh
           npm run build
-      - name: Conservar build y cobertura del SHA
+      - name: Publish Build, JAR/Dist and Coverage Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -97,15 +84,18 @@ jobs:
             target/test-classes/
             target/site/jacoco/
             target/surefire-reports/
+            target/*.jar
             coverage/
             dist/
+            reports/
           if-no-files-found: error
+          retention-days: 14
   sonar_analysis:
     name: SonarQube - SAST and Code Quality
-    needs: [validation, build_test]
+    needs: [build_test]
+    if: needs.build_test.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Only the final policy job is required. Raw outcomes are preserved explicitly.
     outputs:
       outcome: ${{ steps.outcome.outputs.value }}
     steps:
@@ -196,8 +186,8 @@ jobs:
         run: bash .devsecops-templates/scripts/analysis/record-analysis-outcome.sh
   sonar_gate:
     name: SonarQube - Quality Gate and Metrics
-    needs: [validation, sonar_analysis]
-    if: ${{ !cancelled() && needs.validation.result == 'success' && needs.sonar_analysis.outputs.outcome == 'success' }}
+    needs: [build_test, sonar_analysis]
+    if: ${{ !cancelled() && needs.build_test.result == 'success' && needs.sonar_analysis.outputs.outcome == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -239,7 +229,8 @@ jobs:
         run: bash .devsecops-templates/scripts/analysis/record-analysis-outcome.sh
   ghas_sast:
     name: GHAS - SAST / CodeQL (${{ inputs.language }})
-    needs: validation
+    needs: build_test
+    if: needs.build_test.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -270,8 +261,8 @@ jobs:
       - name: Initialize Language-Specific CodeQL Analysis
         uses: github/codeql-action/init@v4
         with:
-          languages: ${{ needs.validation.outputs.codeql_language }}
-          build-mode: ${{ needs.validation.outputs.codeql_build_mode }}
+          languages: ${{ needs.build_test.outputs.codeql_language }}
+          build-mode: ${{ needs.build_test.outputs.codeql_build_mode }}
           queries: security-extended
       - name: Extract Compiled Java Code
         if: inputs.technology == 'maven'
@@ -307,7 +298,8 @@ jobs:
         run: bash .devsecops-templates/scripts/analysis/record-analysis-outcome.sh
   ghas_sca:
     name: GHAS - SCA / Dependency Review
-    needs: validation
+    needs: build_test
+    if: ${{ github.event_name == 'pull_request' && needs.build_test.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -325,7 +317,7 @@ jobs:
           ref: main
           path: .devsecops-templates
           persist-credentials: false
-      - name: Determinar comparaci?n de dependencias
+      - name: Determine Dependency Comparison Base
         id: comparison
         env:
           PR_BASE: ${{ github.event.pull_request.base.sha }}
@@ -378,13 +370,82 @@ jobs:
           RAW_STATUS: ${{ job.status }}
         run: bash .devsecops-templates/scripts/analysis/record-job-outcome.sh
   supply_chain:
-    name: Secretos y dependencias completas
-    uses: ./.github/workflows/workflow-supply-chain.yml
-    with:
-      technology: ${{ inputs.technology }}
+    name: Secrets and Full SCA
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect Secrets (Redacted)
+        id: secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/security
+          docker run --rm -v "$PWD:/repo:ro" \
+            ghcr.io/gitleaks/gitleaks:v8.24.2@sha256:3775e3b6463f02763d67d4e837c7316d300a57108831707db9ed208883e26bb6 \
+            git /repo --redact=100 --no-banner --exit-code=1
+      - uses: actions/setup-java@v4
+        if: ${{ !cancelled() && inputs.technology == 'maven' }}
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: SCA Maven (OWASP Dependency-Check)
+        id: maven
+        if: ${{ !cancelled() && inputs.technology == 'maven' }}
+        run: >-
+          bash ./mvnw -B org.owasp:dependency-check-maven:13.0.0:check
+          -Dformat=JSON -DfailBuildOnCVSS=7 -DfailOnError=true
+          -Dodc.outputDirectory=reports/security
+      - uses: actions/setup-node@v4
+        if: ${{ !cancelled() && inputs.technology == 'node' }}
+        with:
+          node-version: '22.22.2'
+          cache: npm
+      - name: SCA npm (Audit Lockfile)
+        id: npm
+        if: ${{ !cancelled() && inputs.technology == 'node' }}
+        run: |
+          set -euo pipefail
+          mkdir -p reports/security
+          npm audit --package-lock-only --audit-level=high --json > reports/security/npm-audit.json
+      - name: Sanitized Supply Chain Summary
+        if: always()
+        uses: actions/github-script@v7
+        env:
+          SECRET_STATUS: ${{ steps.secrets.outcome }}
+          SCA_STATUS: ${{ inputs.technology == 'maven' && steps.maven.outcome || steps.npm.outcome }}
+        with:
+          script: |
+            const fs = require('node:fs');
+            fs.mkdirSync('reports/security', {recursive:true});
+            const report = {sha:context.sha, run_id:context.runId, attempt:process.env.GITHUB_RUN_ATTEMPT,
+              secrets:process.env.SECRET_STATUS, sca:process.env.SCA_STATUS};
+            fs.writeFileSync('reports/security/summary.json', JSON.stringify(report,null,2));
+            const icon = v => v === 'success' ? '✅ success' : v === 'skipped' ? '⏭️ skipped' : `❌ ${v}`;
+            await core.summary
+              .addHeading('🔐 Supply Chain · Secretos y SCA completo')
+              .addTable([
+                ['Control', 'Herramienta', 'Resultado'],
+                ['Secret Scanning', 'Gitleaks v8.24.2 (redactado)', icon(report.secrets)],
+                ['SCA Completo', '${{ inputs.technology }}' === 'maven' ? 'OWASP Dependency-Check' : 'npm audit (lockfile)', icon(report.sca)]
+              ])
+              .addRaw(`\nCommit: \`${context.sha.slice(0, 7)}\` · Run: \`${context.runId}\` (attempt ${report.attempt})\n`)
+              .write();
+            if (report.secrets !== 'success' || report.sca !== 'success') core.setFailed('Análisis incompleto o bloqueante.');
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: supply-chain-${{ github.run_attempt }}
+          path: reports/security/
+          if-no-files-found: error
+          retention-days: 14
   status:
     name: Security Policy Result
-    needs: [validation, build_test, sonar_analysis, sonar_gate, ghas_sast, ghas_sca, supply_chain]
+    needs: [build_test, sonar_analysis, sonar_gate, ghas_sast, ghas_sca, supply_chain]
     if: always()
     runs-on: ubuntu-latest
     permissions:

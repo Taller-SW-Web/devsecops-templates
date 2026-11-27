@@ -1,4 +1,4 @@
-name: Production Delivery and Authorized Rollback
+name: Production Delivery, Verification and SemVer Release
 on:
   workflow_call:
     inputs:
@@ -11,7 +11,13 @@ on:
       rollback:
         type: boolean
         default: false
+      skip_quality:
+        type: boolean
+        default: false
       release_tag:
+        type: string
+        default: ''
+      version_override:
         type: string
         default: ''
       sonar_organization:
@@ -45,14 +51,15 @@ permissions:
   security-events: write
   pull-requests: write
 concurrency:
-  group: production-${{ github.repository }}
+  group: production-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 jobs:
   validation:
-    name: Validate GitHub Team Membership
+    name: Authorize and Resolve SemVer
     runs-on: ubuntu-latest
     outputs:
       source_sha: ${{ steps.authorization.outputs.source_sha }}
+      release_version: ${{ steps.version.outputs.version }}
     steps:
       - name: Verify Actor Team Membership
         uses: Taller-SW-Web/github-actions/deployment-validator@main
@@ -61,6 +68,10 @@ jobs:
           rollback: ${{ inputs.rollback }}
           release_tag: ${{ inputs.release_tag || (inputs.rollback && github.ref_type == 'tag' && github.ref_name) || '' }}
           token: ${{ secrets.GH_TOKEN_G4 || github.token }}
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Checkout Shared Shell Scripts
         uses: actions/checkout@v4
         with:
@@ -68,33 +79,55 @@ jobs:
           ref: main
           path: .devsecops-templates
           persist-credentials: false
-      - name: Check Deployment Configuration
+      - name: Verify Commit Identity and Deployment Config
         env:
+          SOURCE_SHA: ${{ steps.authorization.outputs.source_sha }}
           TECHNOLOGY: ${{ inputs.technology }}
           HEALTHCHECK_URL: ${{ inputs.healthcheck_url }}
-        run: bash .devsecops-templates/scripts/deploy/validate-deployment-config.sh
-  integration:
-    name: Production Quality Verification
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.rollback }}" != "true" ]; then
+            test "$SOURCE_SHA" = "$GITHUB_SHA"
+          fi
+          bash .devsecops-templates/scripts/deploy/validate-deployment-config.sh
+      - name: Resolve SemVer Release Version
+        id: version
+        if: ${{ !inputs.rollback && github.ref == 'refs/heads/main' }}
+        env:
+          VERSION_OVERRIDE: ${{ inputs.version_override }}
+        run: |
+          set -euo pipefail
+          ver="$(python3 -B .devsecops-templates/scripts/release/resolve_version.py \
+            --version-file VERSION --override "$VERSION_OVERRIDE" --repo-dir . --check-tags \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+  quality:
+    name: Security and Build Verification
     needs: validation
-    if: inputs.rollback == false
-    uses: ./.github/workflows/workflow-ci.yml
+    if: inputs.rollback == false && inputs.skip_quality == false
+    uses: ./.github/workflows/workflow-pr-analysis.yml
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+      pull-requests: write
     with:
       component_name: ${{ inputs.component_name }}
       technology: ${{ inputs.technology }}
-      source_sha: ${{ needs.validation.outputs.source_sha }}
-      sonar_host_url: ${{ inputs.sonar_host_url }}
+      language: ${{ inputs.technology == 'maven' && 'java' || 'typescript' }}
       sonar_organization: ${{ inputs.sonar_organization }}
+      sonar_host_url: ${{ inputs.sonar_host_url }}
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
   deployment:
-    name: Deploy Production Release
+    name: Deploy Production and Smoke
     environment: production
-    needs: [validation, integration]
-    if: ${{ !cancelled() && needs.validation.result == 'success' && (needs.integration.result == 'success' || (inputs.rollback && needs.integration.result == 'skipped')) }}
+    needs: [validation, quality]
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.validation.result == 'success' && (needs.quality.result == 'success' || ((inputs.rollback || inputs.skip_quality) && needs.quality.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write
+      contents: read
       actions: read
     steps:
       - uses: actions/checkout@v4
@@ -128,26 +161,132 @@ jobs:
         env:
           HEALTHCHECK_URL: ${{ inputs.healthcheck_url }}
         run: bash .devsecops-templates/scripts/deploy/verify-production-health.sh
-      - name: Create Production Release Tag
-        id: release
-        if: inputs.rollback == false
-        uses: actions/github-script@v7
-        env:
-          SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
+      - name: Upload Deploy and Smoke Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          script: |
-            const tag = `production-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`;
-            const { data } = await github.rest.git.createTag({
-              ...context.repo, tag, message: `Production deployment ${context.runId}`, type: 'commit',
-              object: process.env.SOURCE_SHA
-            });
-            await github.rest.git.createRef({ ...context.repo, ref: `refs/tags/${tag}`, sha: data.sha });
-            core.setOutput('tag', tag);
-            await core.summary.addHeading('Production release tag')
-              .addRaw(`Tag created after deployment and smoke: ${tag}\n`).write();
+          name: deploy-evidence-${{ github.run_attempt }}
+          path: reports/deploy/
+          if-no-files-found: warn
+          retention-days: 30
       - name: Record Deployment Summary
         env:
           SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
           ROLLBACK: ${{ inputs.rollback }}
-          RELEASE_TAG: ${{ inputs.rollback && (inputs.release_tag || (github.ref_type == 'tag' && github.ref_name)) || steps.release.outputs.tag }}
+          RELEASE_TAG: ${{ inputs.rollback && (inputs.release_tag || (github.ref_type == 'tag' && github.ref_name)) || needs.validation.outputs.release_version }}
         run: bash .devsecops-templates/scripts/deploy/write-deployment-summary.sh
+  release:
+    name: Assemble Evidence ZIP and Publish Release
+    needs: [validation, quality, deployment]
+    if: ${{ !cancelled() && !inputs.rollback && github.ref == 'refs/heads/main' && needs.deployment.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout Shared Release Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
+      - name: Download All Run Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: downloaded-artifacts
+      - name: Collect Evidence, Build ZIP and Package Artifact
+        id: bundle
+        env:
+          VERSION: ${{ needs.validation.outputs.release_version }}
+          SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          ATTEMPT: ${{ github.run_attempt }}
+          TECHNOLOGY: ${{ inputs.technology }}
+        run: |
+          set -euo pipefail
+          python3 -B .devsecops-templates/scripts/release/collect_evidence.py \
+            --artifacts-dir downloaded-artifacts \
+            --evidence-root evidence-root \
+            --output-manifest candidate-manifest.json \
+            --version "$VERSION" \
+            --sha "$SOURCE_SHA" \
+            --repository "$REPOSITORY" \
+            --branch main \
+            --run-id "$RUN_ID" \
+            --attempt "$ATTEMPT"
+          python3 -B .devsecops-templates/scripts/release/bundle.py \
+            --manifest candidate-manifest.json \
+            --root evidence-root \
+            --output release-assets
+          if [ "$TECHNOLOGY" = "maven" ]; then
+            jar_file="$(find downloaded-artifacts -type f -name 'retail-*.jar' ! -name '*.original' | head -n1)"
+            test -n "$jar_file"
+            cp "$jar_file" "release-assets/"
+            (cd release-assets && sha256sum "$(basename "$jar_file")" >> SHA256SUMS)
+          else
+            dist_dir="$(find downloaded-artifacts -type d -name 'dist' | head -n1)"
+            if [ -n "$dist_dir" ]; then
+              tar -czf "release-assets/frontend-dist-${VERSION}.tar.gz" -C "$dist_dir" .
+              (cd release-assets && sha256sum "frontend-dist-${VERSION}.tar.gz" >> SHA256SUMS)
+            fi
+          fi
+      - name: Publish Immutable SemVer GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validation.outputs.release_version }}
+          SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/${REPOSITORY}/git/ref/tags/${VERSION}" >/dev/null 2>&1; then
+            echo "::error::Tag ${VERSION} already exists; refusing to overwrite."
+            exit 1
+          fi
+          {
+            echo "# 🚀 Release ${VERSION}"
+            echo ""
+            echo "| Campo | Valor |"
+            echo "|---|---|"
+            echo "| Componente | \`${{ inputs.component_name }}\` (\`${{ inputs.technology }}\`) |"
+            echo "| Commit SHA | \`${SOURCE_SHA}\` |"
+            echo "| Rama | \`main\` |"
+            echo "| Pipeline Run | [Ver ejecución #${RUN_ID}](https://github.com/${REPOSITORY}/actions/runs/${RUN_ID}) |"
+            echo ""
+            echo "### 🛡️ Evidencia y artefactos adjuntos"
+            echo ""
+            echo "- \`release-evidence-${VERSION}.zip\` — Paquete auditable con reportes verificados de build, SAST, SCA, secretos, integración, performance/DAST o E2E, deploy y \`go-no-go.json\`."
+            echo "- \`release-manifest.json\` — Manifiesto de procedencia con SHAs, run ID y hashes."
+            echo "- \`SHA256SUMS\` — Sumas de verificación SHA-256 de los assets publicados."
+            echo "- Artefacto compilado del commit (\`retail-*.jar\` o \`frontend-dist-${VERSION}.tar.gz\`)."
+            echo ""
+            echo "> **Nota de procedencia:** el despliegue a producción (\`provider-source\`) fue verificado mediante healthcheck tras finalizar los controles obligatorios."
+          } > release-assets/release-notes.md
+          gh release create "$VERSION" \
+            release-assets/* \
+            --repo "$REPOSITORY" \
+            --target "$SOURCE_SHA" \
+            --title "${{ inputs.component_name }} ${VERSION}" \
+            --notes-file release-assets/release-notes.md \
+            --draft=false \
+            --latest=true
+      - name: Publish Release Summary
+        if: always()
+        env:
+          VERSION: ${{ needs.validation.outputs.release_version }}
+          SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          {
+            echo "## 🚀 Release publicada: \`${VERSION}\`"
+            echo ""
+            echo "| Campo | Detalle |"
+            echo "|---|---|"
+            echo "| Tag / Versión | \`${VERSION}\` |"
+            echo "| Commit | \`${SOURCE_SHA}\` |"
+            echo "| Release URL | https://github.com/${REPOSITORY}/releases/tag/${VERSION} |"
+            echo "| Assets | \`release-evidence-${VERSION}.zip\`, \`release-manifest.json\`, \`SHA256SUMS\`, artefacto compilado |"
+          } >> "$GITHUB_STEP_SUMMARY"
