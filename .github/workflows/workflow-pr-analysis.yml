@@ -390,9 +390,26 @@ jobs:
           if [ -f "$PWD/gitleaks.toml" ]; then
             GITLEAKS_CONFIG_ARG="--config /repo/gitleaks.toml"
           fi
-          docker run --rm --platform linux/amd64 -v "$PWD:/repo:ro" \
+          set +e
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD:/repo:ro" \
+            -v "$PWD/reports/security:/out" \
             ghcr.io/gitleaks/gitleaks:v8.24.2 \
-            git /repo --redact=100 --no-banner --exit-code=1 $GITLEAKS_CONFIG_ARG
+            git /repo --redact=100 --no-banner --exit-code=1 \
+            --report-format json --report-path /out/gitleaks-redacted.json \
+            $GITLEAKS_CONFIG_ARG
+          RC=$?
+          set -e
+          if [ -f reports/security/gitleaks-redacted.json ]; then
+            node -e "
+              const fs = require('node:fs');
+              const raw = JSON.parse(fs.readFileSync('reports/security/gitleaks-redacted.json', 'utf8') || '[]');
+              const sanitized = raw.map(f => ({ RuleID: f.RuleID, File: f.File, StartLine: f.StartLine, Commit: (f.Commit || '').slice(0, 12) }));
+              fs.writeFileSync('reports/security/gitleaks-redacted.json', JSON.stringify(sanitized, null, 2));
+              if (sanitized.length > 0) console.log('Gitleaks findings (redacted metadata):', JSON.stringify(sanitized));
+            "
+          fi
+          exit "$RC"
       - name: SCA Maven (Trivy Filesystem)
         id: maven
         if: ${{ !cancelled() && inputs.technology == 'maven' }}
