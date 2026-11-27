@@ -14,7 +14,7 @@ workflow-pr.yml   --uses-->  workflow-pr-analysis.yml  --job policy-->  analysis
 workflow-main.yml --uses-->  workflow-deploy.yml                            -> run_* / required_checks_json
                                |-- policy (perfil, allow_deploy/allow_release)
                                |-- quality --uses--> workflow-pr-analysis.yml (misma validacion que el PR)
-                               |-- authorize (retail-operator) -> deployment (solo gate GO) -> release
+                               |-- prepare (SHA + SemVer) -> deployment continuo (solo gate GO) -> release
 ```
 
 | Repositorio | Archivos | Responsabilidad |
@@ -102,7 +102,7 @@ Backend conserva los secretos existentes `RAILWAY_TOKEN` y `RAILWAY_SERVICE` (es
 
 La autorizacion se ejecuta como job visible `validation` (**Validate GitHub Team Membership**), antes de CI y deploy. No se usa GitHub Environments. Todos los secretos deben configurarse a nivel repositorio u organizacion.
 
-Crear el equipo de organizacion **Taller-SW-Web/retail-operator** y agregar a los operadores. Se exige membresia activa tanto al actor original (`github.actor`) como a quien reejecuta (`github.triggering_actor`). La validacion aplica a todos los despliegues: push main, dispatch normal y rollback. No afecta a los PR de CI. Los usuarios o bots que disparan un push a main tambien deben pertenecer al equipo.
+Crear el equipo de organizacion **Taller-SW-Web/retail-operator** y agregar a los operadores. Se exige membresia activa tanto al actor original (`github.actor`) como a quien reejecuta (`github.triggering_actor`). **Despliegue continuo (27/11/2026):** el push a main y el dispatch normal ya no verifican el equipo; despliegan el SHA del push si el gate es GO (el control previo es el PR revisado hacia main). La membresia solo se exige en el rollback manual. No afecta a los PR de CI.
 
 `GH_TOKEN_G4` debe poder leer miembros de la organizacion (fine-grained PAT con **Members: read**, autorizado para la organizacion, ademas de **Contents: read** y **Actions: read** en el repositorio). No pegar el token en codigo. GITHUB_TOKEN se usa como fallback, pero normalmente no puede leer miembros de la organizacion: si la consulta falla, el job deniega el acceso. La consulta se hace sobre el usuario que ejecuto el workflow, no sobre el propietario del token.
 
@@ -118,7 +118,7 @@ Proteger `production-*` contra actualizacion y borrado mediante un tag ruleset y
 
 ## Despliegue y rollback
 
-El flujo normal valida main, membresia del equipo y configuracion, ejecuta CI obligatorio, crea un tag anotado `production-<run_id>-<attempt>` y despliega exactamente ese tag en Railway/Vercel. El tag se crea despues del CI y antes del deploy para que cada deploy use una referencia identificable. Si el deploy o el healthcheck falla, el tag queda creado, pero no se acepta para rollback porque su run no termino exitosamente.
+El flujo normal valida main y configuracion (sin membresia de equipo), ejecuta CI obligatorio, crea un tag anotado `production-<run_id>-<attempt>` y despliega exactamente ese tag en Railway/Vercel. El tag se crea despues del CI y antes del deploy para que cada deploy use una referencia identificable. Si el deploy o el healthcheck falla, el tag queda creado, pero no se acepta para rollback porque su run no termino exitosamente.
 
 Para volver a una version anterior: Actions -> **Production Deploy** -> Run workflow; en **Use workflow from**, seleccionar la pestaña **Tags** y el tag `production-...` de un run exitoso; activar el checkbox **rollback** y ejecutar. Ya no hay que copiar el tag en otro campo. Para un deploy normal, seleccionar **main** y dejar el checkbox desactivado. El validador revisa tanto al actor original como a quien reejecuta el run. Errores de API, tags arbitrarios, tags ligeros, runs fallidos y membresias no activas deniegan el despliegue antes de acceder al job deployment.
 

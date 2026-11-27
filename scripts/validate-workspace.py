@@ -111,7 +111,7 @@ if missing:
 
 deploy = load(TEMPLATES / 'workflow-deploy.yml')['jobs']
 deployment_if = str(deploy['deployment'].get('if', ''))
-for fragment in ("needs.quality.outputs.decision == 'GO'", "needs.authorize.result == 'success'", "allow_deploy == 'true'"):
+for fragment in ("needs.quality.outputs.decision == 'GO'", "needs.prepare.result == 'success'", "allow_deploy == 'true'"):
     if fragment not in deployment_if:
         errors.append(f'workflow-deploy.yml: deployment no exige {fragment}')
 

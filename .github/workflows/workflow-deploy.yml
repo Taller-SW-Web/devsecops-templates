@@ -1,4 +1,4 @@
-name: Production Delivery, Verification and SemVer Release
+name: Continuous Deployment, Verification and SemVer Release
 on:
   workflow_call:
     inputs:
@@ -100,7 +100,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   policy:
-    name: Delivery Policy
+    name: Deployment Policy
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -108,22 +108,25 @@ jobs:
       allow_deploy: ${{ steps.policy.outputs.allow_deploy }}
       allow_release: ${{ steps.policy.outputs.allow_release }}
     steps:
-      - name: Select Delivery Profile
+      - name: Select Deployment Profile
         id: policy
         uses: Taller-SW-Web/github-actions/analysis-validator@main
         with:
           technology: ${{ inputs.technology }}
           language: ${{ inputs.language }}
-  authorize:
-    name: Authorize and Resolve SemVer
+  prepare:
+    name: Resolve Commit, Config and SemVer
     needs: policy
     if: needs.policy.outputs.allow_deploy == 'true'
     runs-on: ubuntu-latest
     outputs:
-      source_sha: ${{ steps.authorization.outputs.source_sha }}
+      # Despliegue continuo: un push a main con gate GO despliega el SHA del push sin
+      # verificar quien lo hizo. Solo el rollback manual conserva la autorizacion retail-operator.
+      source_sha: ${{ inputs.rollback && steps.authorization.outputs.source_sha || github.sha }}
       release_version: ${{ steps.version.outputs.version }}
     steps:
-      - name: Verify Actor Team Membership
+      - name: Authorize Manual Rollback (retail-operator)
+        if: inputs.rollback
         uses: Taller-SW-Web/github-actions/deployment-validator@main
         id: authorization
         with:
@@ -143,7 +146,7 @@ jobs:
           persist-credentials: false
       - name: Verify Commit Identity and Deployment Config
         env:
-          SOURCE_SHA: ${{ steps.authorization.outputs.source_sha }}
+          SOURCE_SHA: ${{ inputs.rollback && steps.authorization.outputs.source_sha || github.sha }}
           TECHNOLOGY: ${{ inputs.technology }}
           HEALTHCHECK_URL: ${{ inputs.healthcheck_url }}
         run: |
@@ -197,9 +200,9 @@ jobs:
   deployment:
     name: Deploy Production and Smoke
     environment: production
-    needs: [policy, authorize, quality]
+    needs: [policy, prepare, quality]
     # Despliega solo con gate GO del mismo run; el rollback es el unico camino sin validacion (y exige autorizacion).
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.policy.outputs.allow_deploy == 'true' && needs.authorize.result == 'success' && ((needs.policy.outputs.policy_profile == 'rollback' && needs.quality.result == 'skipped') || (needs.policy.outputs.policy_profile != 'rollback' && needs.quality.result == 'success' && needs.quality.outputs.decision == 'GO')) }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.policy.outputs.allow_deploy == 'true' && needs.prepare.result == 'success' && ((needs.policy.outputs.policy_profile == 'rollback' && needs.quality.result == 'skipped') || (needs.policy.outputs.policy_profile != 'rollback' && needs.quality.result == 'success' && needs.quality.outputs.decision == 'GO')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -208,7 +211,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.authorize.outputs.source_sha }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
       - name: Checkout Shared Shell Scripts
         uses: actions/checkout@v4
@@ -247,13 +250,13 @@ jobs:
           retention-days: 30
       - name: Record Deployment Summary
         env:
-          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           ROLLBACK: ${{ inputs.rollback }}
-          RELEASE_TAG: ${{ inputs.rollback && (inputs.release_tag || (github.ref_type == 'tag' && github.ref_name)) || needs.authorize.outputs.release_version }}
+          RELEASE_TAG: ${{ inputs.rollback && (inputs.release_tag || (github.ref_type == 'tag' && github.ref_name)) || needs.prepare.outputs.release_version }}
         run: bash .devsecops-templates/scripts/deploy/write-deployment-summary.sh
   release:
     name: Assemble Evidence ZIP and Publish Release
-    needs: [policy, authorize, quality, deployment]
+    needs: [policy, prepare, quality, deployment]
     if: ${{ !cancelled() && !inputs.rollback && needs.policy.outputs.allow_release == 'true' && github.ref == 'refs/heads/main' && needs.deployment.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -275,8 +278,8 @@ jobs:
       - name: Collect Evidence, Build ZIP and Package Artifact
         id: bundle
         env:
-          VERSION: ${{ needs.authorize.outputs.release_version }}
-          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.release_version }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           ATTEMPT: ${{ github.run_attempt }}
@@ -312,8 +315,8 @@ jobs:
       - name: Publish Immutable SemVer GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.authorize.outputs.release_version }}
-          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.release_version }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
         run: |
@@ -352,8 +355,8 @@ jobs:
       - name: Publish Release Summary
         if: always()
         env:
-          VERSION: ${{ needs.authorize.outputs.release_version }}
-          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
+          VERSION: ${{ needs.prepare.outputs.release_version }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           REPOSITORY: ${{ github.repository }}
         run: |
           {
