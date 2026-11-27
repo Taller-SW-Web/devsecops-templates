@@ -384,9 +384,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p reports/security
+          # Usa gitleaks.toml del repositorio si existe (allowlist documentada de fixtures de test).
+          # Si no existe, Gitleaks usa sus reglas por defecto.
+          GITLEAKS_CONFIG_ARG=""
+          if [ -f "$PWD/gitleaks.toml" ]; then
+            GITLEAKS_CONFIG_ARG="--config /repo/gitleaks.toml"
+          fi
           docker run --rm --platform linux/amd64 -v "$PWD:/repo:ro" \
             ghcr.io/gitleaks/gitleaks:v8.24.2 \
-            git /repo --redact=100 --no-banner --exit-code=1
+            git /repo --redact=100 --no-banner --exit-code=1 $GITLEAKS_CONFIG_ARG
       - name: SCA Maven (Trivy Filesystem)
         id: maven
         if: ${{ !cancelled() && inputs.technology == 'maven' }}
