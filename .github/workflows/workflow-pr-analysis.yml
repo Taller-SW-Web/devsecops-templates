@@ -164,7 +164,8 @@ jobs:
             ${{ steps.project.outputs.organization_argument }}
             -Dsonar.projectKey=${{ steps.project.outputs.key }}
             -Dsonar.sources=src
-            -Dsonar.exclusions=**/*.test.*,**/*.spec.*
+            -Dsonar.exclusions=**/*.test.*,**/*.spec.*,.github/**,e2e/**
+            -Dsonar.coverage.exclusions=**/*.test.*,**/*.spec.*,e2e/**,.github/**
             -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info
             -Dsonar.qualitygate.wait=false
       - name: Publish Scanner Task Metadata
