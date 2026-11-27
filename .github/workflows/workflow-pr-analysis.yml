@@ -418,7 +418,7 @@ jobs:
               else console.log('Gitleaks: no leaks found');
             "
           fi
-          exit \"\$RC\"
+          exit $RC
       - name: SCA Maven (Trivy Filesystem)
         id: maven
         if: ${{ !cancelled() && inputs.technology == 'maven' }}
