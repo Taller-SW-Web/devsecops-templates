@@ -384,22 +384,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p reports/security
-          docker run --rm -v "$PWD:/repo:ro" \
-            ghcr.io/gitleaks/gitleaks:v8.24.2@sha256:3775e3b6463f02763d67d4e837c7316d300a57108831707db9ed208883e26bb6 \
+          docker run --rm --platform linux/amd64 -v "$PWD:/repo:ro" \
+            ghcr.io/gitleaks/gitleaks:v8.24.2 \
             git /repo --redact=100 --no-banner --exit-code=1
-      - uses: actions/setup-java@v4
-        if: ${{ !cancelled() && inputs.technology == 'maven' }}
-        with:
-          distribution: temurin
-          java-version: '21'
-          cache: maven
-      - name: SCA Maven (OWASP Dependency-Check)
+      - name: SCA Maven (Trivy Filesystem)
         id: maven
         if: ${{ !cancelled() && inputs.technology == 'maven' }}
-        run: >-
-          bash ./mvnw -B org.owasp:dependency-check-maven:13.0.0:check
-          -Dformat=JSON -DfailBuildOnCVSS=7 -DfailOnError=true
-          -Dodc.outputDirectory=reports/security
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p reports/security
+          docker run --rm --platform linux/amd64 \
+            -v "$PWD:/workspace:ro" \
+            -v "$PWD/reports/security:/out" \
+            ghcr.io/aquasecurity/trivy:0.58.2 \
+            fs /workspace --scanners vuln --severity HIGH,CRITICAL --format json --output /out/trivy-sca.json --exit-code 1
       - uses: actions/setup-node@v4
         if: ${{ !cancelled() && inputs.technology == 'node' }}
         with:
@@ -431,7 +430,7 @@ jobs:
               .addTable([
                 ['Control', 'Herramienta', 'Resultado'],
                 ['Secret Scanning', 'Gitleaks v8.24.2 (redactado)', icon(report.secrets)],
-                ['SCA Completo', '${{ inputs.technology }}' === 'maven' ? 'OWASP Dependency-Check' : 'npm audit (lockfile)', icon(report.sca)]
+                ['SCA Completo', '${{ inputs.technology }}' === 'maven' ? 'Trivy SCA (HIGH/CRITICAL)' : 'npm audit (lockfile)', icon(report.sca)]
               ])
               .addRaw(`\nCommit: \`${context.sha.slice(0, 7)}\` · Run: \`${context.runId}\` (attempt ${report.attempt})\n`)
               .write();

@@ -61,7 +61,7 @@ def collect(
 
     add_report('build', 'ci/build-report.xml', ('surefire-reports/*.xml', 'reports/vitest.xml', 'coverage/lcov.info'))
     add_report('sast', 'security/sast/sonar-quality-gate.json', ('sonar-quality-gate.json',))
-    add_report('sca', 'security/sca/sca-report.json', ('dependency-check-report.json', 'npm-audit.json', 'dependency-review.json'))
+    add_report('sca', 'security/sca/sca-report.json', ('trivy-sca.json', 'dependency-check-report.json', 'npm-audit.json', 'dependency-review.json'))
     add_report('secrets', 'security/secrets/summary.json', ('summary.json',))
     add_report('integration', 'integration/integration-report.xml', ('integration-reports/*.xml', 'postgres-reports/*.xml', 'reports/vitest.xml'))
     add_report('performance', 'performance/perf-summary.json', ('target/performance/*.json', 'e2e-pos.json', 'reports/e2e/*.json'))
