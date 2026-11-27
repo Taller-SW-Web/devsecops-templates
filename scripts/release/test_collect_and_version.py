@@ -19,6 +19,19 @@ class ResolveVersionTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 resolve_version(vf, '', ['v1.2.3'])
 
+    def test_cli_collision_fails_without_emitting_partial_json(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            vf = Path(tmp) / 'VERSION'
+            vf.write_text('0.1.0\n', encoding='utf-8')
+            result = subprocess.run([
+                sys.executable, str(Path(__file__).with_name('resolve_version.py')),
+                '--version-file', str(vf), '--repo-dir', tmp, '--check-tags'
+            ], capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, '')
+            self.assertIn('::error title=Resolucion SemVer::', result.stderr)
+
     def test_rejects_malformed_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             vf = Path(tmp) / 'VERSION'

@@ -159,9 +159,13 @@ jobs:
           VERSION_OVERRIDE: ${{ inputs.version_override }}
         run: |
           set -euo pipefail
-          ver="$(python3 -B .devsecops-templates/scripts/release/resolve_version.py \
-            --version-file VERSION --override "$VERSION_OVERRIDE" --repo-dir . --check-tags \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          python3 -B .devsecops-templates/scripts/release/resolve_version.py \
+            --version-file VERSION \
+            --override "$VERSION_OVERRIDE" \
+            --repo-dir . \
+            --check-tags > "$RUNNER_TEMP/resolved-version.json"
+          ver="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' \
+            "$RUNNER_TEMP/resolved-version.json")"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
   quality:
     name: Security Analysis
