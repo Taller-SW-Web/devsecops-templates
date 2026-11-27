@@ -396,20 +396,29 @@ jobs:
             -v "$PWD/reports/security:/out" \
             ghcr.io/gitleaks/gitleaks:v8.24.2 \
             git /repo --redact=100 --no-banner --exit-code=1 \
-            --report-format json --report-path /out/gitleaks-redacted.json \
+            --report-format json --report-path /out/gitleaks-raw.json \
             $GITLEAKS_CONFIG_ARG
           RC=$?
           set -e
-          if [ -f reports/security/gitleaks-redacted.json ]; then
+          # gitleaks-raw.json es creado por Docker (root). No lo sobrescribimos.
+          # Generamos gitleaks-summary.json con solo metadatos no sensibles (sin secretos).
+          if [ -f reports/security/gitleaks-raw.json ]; then
             node -e "
               const fs = require('node:fs');
-              const raw = JSON.parse(fs.readFileSync('reports/security/gitleaks-redacted.json', 'utf8') || '[]');
-              const sanitized = raw.map(f => ({ RuleID: f.RuleID, File: f.File, StartLine: f.StartLine, Commit: (f.Commit || '').slice(0, 12) }));
-              fs.writeFileSync('reports/security/gitleaks-redacted.json', JSON.stringify(sanitized, null, 2));
-              if (sanitized.length > 0) console.log('Gitleaks findings (redacted metadata):', JSON.stringify(sanitized));
+              const raw = JSON.parse(fs.readFileSync('reports/security/gitleaks-raw.json', 'utf8') || '[]');
+              const summary = raw.map(f => ({
+                RuleID: f.RuleID,
+                File: f.File,
+                StartLine: f.StartLine,
+                Commit: (f.Commit || '').slice(0, 12)
+              }));
+              // Escribimos el resumen en un archivo nuevo (no el de Docker)
+              fs.writeFileSync('reports/security/gitleaks-summary.json', JSON.stringify(summary, null, 2));
+              if (summary.length > 0) console.log('Gitleaks findings (redacted metadata):', JSON.stringify(summary));
+              else console.log('Gitleaks: no leaks found');
             "
           fi
-          exit "$RC"
+          exit \"\$RC\"
       - name: SCA Maven (Trivy Filesystem)
         id: maven
         if: ${{ !cancelled() && inputs.technology == 'maven' }}
