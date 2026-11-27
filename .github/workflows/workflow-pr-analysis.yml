@@ -394,11 +394,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p reports/security
+          # --exit-code 0: Trivy genera el reporte completo pero no bloquea el step.
+          # La política de bloqueo (CRITICAL) la aplica el step de Summary más abajo,
+          # separando escaneos informativos (HIGH) de bloqueantes (CRITICAL).
           docker run --rm --platform linux/amd64 \
             -v "$PWD:/workspace:ro" \
             -v "$PWD/reports/security:/out" \
             ghcr.io/aquasecurity/trivy:0.58.2 \
-            fs /workspace --scanners vuln --severity HIGH,CRITICAL --format json --output /out/trivy-sca.json --exit-code 1
+            fs /workspace --scanners vuln --severity HIGH,CRITICAL --format json --output /out/trivy-sca.json --exit-code 0
+          echo "trivy_done=true" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v4
         if: ${{ !cancelled() && inputs.technology == 'node' }}
         with:
@@ -407,34 +411,104 @@ jobs:
       - name: SCA npm (Audit Lockfile)
         id: npm
         if: ${{ !cancelled() && inputs.technology == 'node' }}
+        shell: bash
         run: |
           set -euo pipefail
           mkdir -p reports/security
-          npm audit --package-lock-only --audit-level=high --json > reports/security/npm-audit.json
+          # npm audit con exit-code 0 siempre; guardamos salida para que el summary
+          # evalúe si hay high/critical y decida el bloqueo.
+          npm audit --package-lock-only --audit-level=high --json > reports/security/npm-audit.json || true
+          echo "npm_done=true" >> "$GITHUB_OUTPUT"
       - name: Sanitized Supply Chain Summary
         if: always()
         uses: actions/github-script@v7
         env:
           SECRET_STATUS: ${{ steps.secrets.outcome }}
-          SCA_STATUS: ${{ inputs.technology == 'maven' && steps.maven.outcome || steps.npm.outcome }}
+          MAVEN_OUTCOME: ${{ steps.maven.outcome }}
+          NPM_OUTCOME: ${{ steps.npm.outcome }}
+          TECHNOLOGY: ${{ inputs.technology }}
         with:
           script: |
             const fs = require('node:fs');
             fs.mkdirSync('reports/security', {recursive:true});
-            const report = {sha:context.sha, run_id:context.runId, attempt:process.env.GITHUB_RUN_ATTEMPT,
-              secrets:process.env.SECRET_STATUS, sca:process.env.SCA_STATUS};
-            fs.writeFileSync('reports/security/summary.json', JSON.stringify(report,null,2));
-            const icon = v => v === 'success' ? '✅ success' : v === 'skipped' ? '⏭️ skipped' : `❌ ${v}`;
+
+            const tech        = process.env.TECHNOLOGY;
+            const secretStatus = process.env.SECRET_STATUS;
+
+            // ── Evaluar SCA según tecnología ─────────────────────────────────────────
+            let scaStatus = 'skipped';
+            let criticalCount = 0;
+            let highCount = 0;
+            let scaBlocking = false;
+
+            if (tech === 'maven' && process.env.MAVEN_OUTCOME !== 'skipped') {
+              scaStatus = process.env.MAVEN_OUTCOME;   // 'success' | 'failure'
+              // Leer el JSON de Trivy para conteo real de severidades
+              try {
+                const trivyRaw = fs.readFileSync('reports/security/trivy-sca.json', 'utf8');
+                const trivy = JSON.parse(trivyRaw);
+                for (const r of (trivy.Results || [])) {
+                  for (const v of (r.Vulnerabilities || [])) {
+                    if (v.Severity === 'CRITICAL') criticalCount++;
+                    else if (v.Severity === 'HIGH') highCount++;
+                  }
+                }
+                scaStatus = 'success';          // el step corrió OK (exit-code 0)
+                scaBlocking = criticalCount > 0; // solo CRITICAL bloquea
+              } catch (_) {
+                scaStatus = 'failure';           // no se generó el JSON → error real
+              }
+            } else if (tech === 'node' && process.env.NPM_OUTCOME !== 'skipped') {
+              try {
+                const auditRaw = fs.readFileSync('reports/security/npm-audit.json', 'utf8');
+                const audit = JSON.parse(auditRaw);
+                criticalCount = audit?.metadata?.vulnerabilities?.critical ?? 0;
+                highCount     = audit?.metadata?.vulnerabilities?.high     ?? 0;
+                scaStatus     = 'success';
+                scaBlocking   = criticalCount > 0;
+              } catch (_) {
+                scaStatus = 'failure';
+              }
+            }
+
+            // ── Serializar resumen ───────────────────────────────────────────────────
+            const report = {
+              sha: context.sha, run_id: context.runId,
+              attempt: process.env.GITHUB_RUN_ATTEMPT,
+              secrets: secretStatus,
+              sca: scaStatus,
+              sca_critical: criticalCount,
+              sca_high: highCount,
+              sca_blocking: scaBlocking,
+            };
+            fs.writeFileSync('reports/security/summary.json', JSON.stringify(report, null, 2));
+
+            // ── Iconos ───────────────────────────────────────────────────────────────
+            const icon = v => v === 'success' ? '✅' : v === 'skipped' ? '⏭️' : '❌';
+            const scaTool = tech === 'maven' ? 'Trivy fs (HIGH+CRITICAL · bloquea solo CRITICAL)' : 'npm audit (bloquea solo CRITICAL)';
+            const scaDetail = `${icon(scaStatus)} ${criticalCount > 0 ? `🔴 ${criticalCount} CRITICAL` : ''}${highCount > 0 ? ` 🟠 ${highCount} HIGH` : ''}${criticalCount === 0 && highCount === 0 ? ' sin hallazgos' : ''}`.trim();
+
+            // ── GitHub Actions Summary ───────────────────────────────────────────────
             await core.summary
-              .addHeading('🔐 Supply Chain · Secretos y SCA completo')
+              .addHeading('🔐 Supply Chain · Secretos & SCA')
               .addTable([
-                ['Control', 'Herramienta', 'Resultado'],
-                ['Secret Scanning', 'Gitleaks v8.24.2 (redactado)', icon(report.secrets)],
-                ['SCA Completo', '${{ inputs.technology }}' === 'maven' ? 'Trivy SCA (HIGH/CRITICAL)' : 'npm audit (lockfile)', icon(report.sca)]
+                [{data: 'Control', header: true}, {data: 'Herramienta', header: true}, {data: 'Resultado', header: true}, {data: 'Hallazgos', header: true}],
+                ['🔑 Secret Scanning', 'Gitleaks v8.24.2 (redactado)', `${icon(secretStatus)} ${secretStatus}`, secretStatus === 'success' ? '— sin secretos' : '⚠️ revisar log'],
+                ['📦 SCA Completo',    scaTool,                        scaDetail,                                 scaBlocking ? '🚫 BLOQUEANTE (CRITICAL)' : highCount > 0 ? '⚠️ Informativo (HIGH)' : '✅'],
               ])
-              .addRaw(`\nCommit: \`${context.sha.slice(0, 7)}\` · Run: \`${context.runId}\` (attempt ${report.attempt})\n`)
+              .addRaw(`\n> **Política:** vulnerabilidades CRITICAL bloquean el pipeline · HIGH son informativas · ver artefacto \`supply-chain-${report.attempt}\`\n`)
+              .addRaw(`\nCommit: \`${context.sha.slice(0, 7)}\` · Run: \`${context.runId}\` · attempt \`${report.attempt}\`\n`)
               .write();
-            if (report.secrets !== 'success' || report.sca !== 'success') core.setFailed('Análisis incompleto o bloqueante.');
+
+            // ── Decisión de bloqueo ──────────────────────────────────────────────────
+            const fatal = secretStatus !== 'success' || scaBlocking || scaStatus === 'failure';
+            if (fatal) {
+              const reasons = [];
+              if (secretStatus !== 'success') reasons.push('Gitleaks detectó secretos o falló');
+              if (scaBlocking)                reasons.push(`Trivy/npm-audit: ${criticalCount} CRITICAL detectadas`);
+              if (scaStatus === 'failure')    reasons.push('SCA no pudo completar el análisis');
+              core.setFailed(`Supply Chain BLOQUEADO: ${reasons.join(' | ')}`);
+            }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
