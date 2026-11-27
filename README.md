@@ -1,36 +1,46 @@
 # Retail CI/CD
 
 Implementacion del patron caller -> reusable workflow -> acciones compartidas.
-Los callers consumen las acciones y plantillas compartidas mediante `@main`. Los resultados efectivos de analisis y despliegue se consultan en GitHub Actions.
+Los callers consumen las acciones y plantillas compartidas mediante `@main` (aun no existen tags; ver riesgos en la migracion). Los resultados efectivos de analisis y despliegue se consultan en GitHub Actions.
 
 Los pasos Bash reutilizados viven en `scripts/` como archivos `.sh`; los workflows obtienen ese directorio con un checkout adicional de este repositorio en `.devsecops-templates/`. Los bloques JavaScript que usan `actions/github-script` se mantienen en sus acciones porque usan el contexto y la API de GitHub Actions.
 
 
-## Archivos por repositorio
+## Arquitectura centralizada
+
+```text
+App (wrapper)                         devsecops-templates                       github-actions
+workflow-pr.yml   --uses-->  workflow-pr-analysis.yml  --job policy-->  analysis-validator (policy.cjs)
+workflow-main.yml --uses-->  workflow-deploy.yml                            -> run_* / required_checks_json
+                               |-- policy (perfil, allow_deploy/allow_release)
+                               |-- quality --uses--> workflow-pr-analysis.yml (misma validacion que el PR)
+                               |-- authorize (retail-operator) -> deployment (solo gate GO) -> release
+```
 
 | Repositorio | Archivos | Responsabilidad |
 |---|---|---|
-| G4-Retail-backend y G4-Retail-frontend | `.github/workflows/workflow-pr.yml` | Eventos de PR; un solo job que llama al template de seguridad |
-| G4-Retail-backend y G4-Retail-frontend | `.github/workflows/workflow-main.yml` | Push main y dispatch con rollback/tag; un solo job que llama al template CD |
-| devsecops-templates | `.github/workflows/workflow-pr-analysis.yml` | Validacion, build/tests obligatorios, Sonar scan/gate, GHAS SAST/SCA y reporte consolidado |
-| devsecops-templates | `.github/workflows/workflow-ci.yml` | Validacion, compilacion, tests, SonarQube, dependencias y resultado |
-| devsecops-templates | `.github/workflows/workflow-deploy.yml` | Autorizacion, CI, despliegue, salud HTTP y tag |
-| github-actions | `analysis-validator/action.yml`, `policy.cjs` | Seleccion y obligatoriedad de analisis segun el evento real |
-| github-actions | `deployment-validator/action.yml`, `validate.cjs` | Equipo GitHub, contexto, tag y procedencia del rollback |
-| github-actions | `tests/policy.test.cjs` | Pruebas de autorizacion y politica |
+| G4-Retail-backend / -frontend | `.github/workflows/workflow-pr.yml`, `workflow-main.yml` | Solo triggers, permisos, `with` y secretos explicitos; un job `uses` cada uno |
+| devsecops-templates | `workflow-pr-analysis.yml` | `policy`, `build_test`, Sonar (scan + gate), CodeQL, Dependency Review, Gitleaks + SCA, `integration`, `performance`, `dast`, `e2e`, `status` y `pr-gate` |
+| devsecops-templates | `workflow-deploy.yml` | Politica de entrega, validacion central (anidada), autorizacion, deploy Railway/Vercel, smoke y release SemVer/ZIP |
+| devsecops-templates | `scripts/qa/` | Arranque/parada de la instancia local efimera y validacion de rutas entregadas por el caller |
+| github-actions | `analysis-validator/` | Politica determinista por evento, rama y tecnologia (fail-closed) |
+| github-actions | `security-report/gate.cjs` | Gate final GO/NO-GO contra `required_checks_json` |
 
-Los cuatro templates anteriores se reemplazan por tres orquestadores (PR, CI y CD). Publicar los consumidores y plantillas coordinadamente: los callers antiguos referencian archivos eliminados.
+Los scripts de negocio (`scripts/ci/integracion.sh`, `scripts/performance/pos.mjs`, `scripts/dast/*.mjs`, `e2e/venta.cjs`) siguen en cada app y se ejecutan desde el checkout del repositorio llamador; el wrapper solo pasa sus rutas (validadas: relativas, sin `..`, existentes).
 
 ## Politica
 
-| Contexto | Build/tests | SonarQube | GHAS SAST / SCA |
-|---|---|---|---|
-| PR feature -> develop | Obligatorios en el job Build and Unit Tests; tambien generan JaCoCo/LCOV para Sonar | Informativo | Informativos |
-| PR develop -> main | Obligatorios en el job Build and Unit Tests; tambien generan cobertura para Sonar | Obligatorio | Obligatorios |
-| Push main / dispatch normal desde main | Obligatorios en CD | Obligatorio en CI | Se exige revision en el PR protegido |
-| Rollback autorizado desde main | Reconstruye la version seleccionada | No repite gate historico | No repite analisis de PR |
+| Contexto | Build + unit | Sonar + gate | CodeQL | SCA completo + secretos | Dependency Review | Integracion (backend) | Performance + DAST (backend) | E2E (frontend) | Deploy / release |
+|---|---|---|---|---|---|---|---|---|---|
+| PR `feature/fix/* -> develop` | Si | Si | Si | Si | Si | Si | No | No | No |
+| PR `develop -> main` | Si | Si | Si | Si | Si | Si | Si | Si | No |
+| Push `develop` | Si | Si | Si | Si | No (sin diff de PR) | Si | No | No | No |
+| Push/dispatch `main` | Si | Si | Si | Si | No (sin diff de PR) | Si | Si | Si | Solo con gate GO |
+| Rollback explicito | No | No | No | No | No | No | No | No | Deploy autorizado, sin release |
 
-Los PR a main deben provenir de develop del mismo repositorio. Una rama de un fork llamada develop no puede promoverse a main. Los errores del analizador o la ausencia de reportes tambien bloquean main. Hacia develop build/tests bloquean si fallan; GHAS y Sonar conservan su resultado en summary/comentario, pero los hallazgos de seguridad son informativos. La validacion de contexto/lenguaje siempre es obligatoria.
+`pr-gate` (check `Security Analysis / pr-gate`) evalua los resultados reales contra la lista exacta de obligatorios del perfil: un obligatorio `failure`, `cancelled`, `skipped` o ausente es NO-GO; un job no aplicable omitido no bloquea. Escribe `gate-result.json` (perfil, repositorio, SHA, run id, attempt, resultados y decision) en el artefacto `pr-gate-<attempt>`. `workflow-deploy.yml` solo despliega si ese mismo gate devuelve `GO`.
+
+Validacion local: `python scripts/validate-workspace.py` (desde el workspace con los cinco repos), `actionlint` y `node --test tests/*.test.cjs` en github-actions.
 
 ## Analisis de PR: decisiones y alcance
 
@@ -51,7 +61,7 @@ Dependency Review analiza la diferencia de dependencias del PR a partir de depen
 
 SonarQube aporta SAST, fiabilidad, mantenibilidad, duplicacion, cobertura de nuevo codigo y revision de security hotspots segun las reglas y el Quality Gate configurados. Un hotspot requiere revision humana; no equivale automaticamente a una vulnerabilidad confirmada. El job `sonar_analysis` ejecuta los tests antes del escaneo: JaCoCo genera XML para Maven y Vitest genera LCOV para Node/TypeScript. Para Vitest, el template instala temporalmente el proveedor V8 de la misma version que Vitest, sin modificar el lockfile. Si faltan tests, falla su ejecucion o no se genera el reporte, Sonar no puede presentar cobertura como aprobada. No se duplica SCA en Sonar: la disponibilidad y licencia de esa funcion dependen del producto, y GHAS ya cubre el control definido aqui.
 
-No se agrega DAST sin una aplicacion desplegada de prueba. Secret scanning/push protection se configuran en GitHub (GitHub Secret Protection cuando aplique), no se representan como un job que el YAML no puede ejecutar.
+DAST (OWASP ZAP) se ejecuta en el job `dast` contra una instancia local efimera, nunca contra produccion. Secret scanning/push protection se configuran en GitHub (GitHub Secret Protection cuando aplique), no se representan como un job que el YAML no puede ejecutar.
 
 ### Tecnologia y lenguaje declarados por el desarrollador
 

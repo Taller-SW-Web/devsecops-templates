@@ -12,8 +12,13 @@ on:
         type: boolean
         default: false
       skip_quality:
+        description: DEPRECATED and ignored. Validation always runs inside this workflow (single owner of the pre-deploy gate).
         type: boolean
         default: false
+      language:
+        description: Optional source language; inferred from technology when empty
+        type: string
+        default: ''
       release_tag:
         type: string
         default: ''
@@ -30,6 +35,46 @@ on:
       healthcheck_url:
         required: true
         type: string
+      report_retention_days:
+        description: Retention for QA evidence produced by the validation
+        type: number
+        default: 30
+      app_jar_pattern:
+        type: string
+        default: '*.jar'
+      app_health_path:
+        type: string
+        default: /actuator/health
+      app_boot_args:
+        type: string
+        default: ''
+      integration_script:
+        type: string
+        default: ''
+      integration_postgres_db:
+        type: string
+        default: integration
+      integration_report_paths:
+        type: string
+        default: target/integration-reports/
+      performance_script:
+        type: string
+        default: ''
+      dast_token_script:
+        type: string
+        default: ''
+      dast_preflight_path:
+        type: string
+        default: ''
+      dast_rules_file:
+        type: string
+        default: .zap/api-scan-rules.tsv
+      dast_summary_script:
+        type: string
+        default: ''
+      e2e_script:
+        type: string
+        default: ''
     secrets:
       SONAR_TOKEN:
         required: false
@@ -54,8 +99,25 @@ concurrency:
   group: production-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 jobs:
-  validation:
+  policy:
+    name: Delivery Policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      policy_profile: ${{ steps.policy.outputs.policy_profile }}
+      allow_deploy: ${{ steps.policy.outputs.allow_deploy }}
+      allow_release: ${{ steps.policy.outputs.allow_release }}
+    steps:
+      - name: Select Delivery Profile
+        id: policy
+        uses: Taller-SW-Web/github-actions/analysis-validator@main
+        with:
+          technology: ${{ inputs.technology }}
+          language: ${{ inputs.language }}
+  authorize:
     name: Authorize and Resolve SemVer
+    needs: policy
+    if: needs.policy.outputs.allow_deploy == 'true'
     runs-on: ubuntu-latest
     outputs:
       source_sha: ${{ steps.authorization.outputs.source_sha }}
@@ -102,10 +164,10 @@ jobs:
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
           echo "version=$ver" >> "$GITHUB_OUTPUT"
   quality:
-    name: Security and Build Verification
-    needs: validation
-    if: inputs.rollback == false && inputs.skip_quality == false
-    uses: ./.github/workflows/workflow-pr-analysis.yml
+    name: Security Analysis
+    needs: policy
+    if: needs.policy.outputs.policy_profile != 'rollback'
+    uses: Taller-SW-Web/devsecops-templates/.github/workflows/workflow-pr-analysis.yml@main
     permissions:
       contents: read
       actions: read
@@ -114,16 +176,30 @@ jobs:
     with:
       component_name: ${{ inputs.component_name }}
       technology: ${{ inputs.technology }}
-      language: ${{ inputs.technology == 'maven' && 'java' || 'typescript' }}
+      language: ${{ inputs.language || (inputs.technology == 'maven' && 'java' || 'typescript') }}
       sonar_organization: ${{ inputs.sonar_organization }}
       sonar_host_url: ${{ inputs.sonar_host_url }}
+      report_retention_days: ${{ inputs.report_retention_days }}
+      app_jar_pattern: ${{ inputs.app_jar_pattern }}
+      app_health_path: ${{ inputs.app_health_path }}
+      app_boot_args: ${{ inputs.app_boot_args }}
+      integration_script: ${{ inputs.integration_script }}
+      integration_postgres_db: ${{ inputs.integration_postgres_db }}
+      integration_report_paths: ${{ inputs.integration_report_paths }}
+      performance_script: ${{ inputs.performance_script }}
+      dast_token_script: ${{ inputs.dast_token_script }}
+      dast_preflight_path: ${{ inputs.dast_preflight_path }}
+      dast_rules_file: ${{ inputs.dast_rules_file }}
+      dast_summary_script: ${{ inputs.dast_summary_script }}
+      e2e_script: ${{ inputs.e2e_script }}
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
   deployment:
     name: Deploy Production and Smoke
     environment: production
-    needs: [validation, quality]
-    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.validation.result == 'success' && (needs.quality.result == 'success' || ((inputs.rollback || inputs.skip_quality) && needs.quality.result == 'skipped')) }}
+    needs: [policy, authorize, quality]
+    # Despliega solo con gate GO del mismo run; el rollback es el unico camino sin validacion (y exige autorizacion).
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.policy.outputs.allow_deploy == 'true' && needs.authorize.result == 'success' && ((needs.policy.outputs.policy_profile == 'rollback' && needs.quality.result == 'skipped') || (needs.policy.outputs.policy_profile != 'rollback' && needs.quality.result == 'success' && needs.quality.outputs.decision == 'GO')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -132,7 +208,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.validation.outputs.source_sha }}
+          ref: ${{ needs.authorize.outputs.source_sha }}
           persist-credentials: false
       - name: Checkout Shared Shell Scripts
         uses: actions/checkout@v4
@@ -171,14 +247,14 @@ jobs:
           retention-days: 30
       - name: Record Deployment Summary
         env:
-          SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
           ROLLBACK: ${{ inputs.rollback }}
-          RELEASE_TAG: ${{ inputs.rollback && (inputs.release_tag || (github.ref_type == 'tag' && github.ref_name)) || needs.validation.outputs.release_version }}
+          RELEASE_TAG: ${{ inputs.rollback && (inputs.release_tag || (github.ref_type == 'tag' && github.ref_name)) || needs.authorize.outputs.release_version }}
         run: bash .devsecops-templates/scripts/deploy/write-deployment-summary.sh
   release:
     name: Assemble Evidence ZIP and Publish Release
-    needs: [validation, quality, deployment]
-    if: ${{ !cancelled() && !inputs.rollback && github.ref == 'refs/heads/main' && needs.deployment.result == 'success' }}
+    needs: [policy, authorize, quality, deployment]
+    if: ${{ !cancelled() && !inputs.rollback && needs.policy.outputs.allow_release == 'true' && github.ref == 'refs/heads/main' && needs.deployment.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -199,8 +275,8 @@ jobs:
       - name: Collect Evidence, Build ZIP and Package Artifact
         id: bundle
         env:
-          VERSION: ${{ needs.validation.outputs.release_version }}
-          SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
+          VERSION: ${{ needs.authorize.outputs.release_version }}
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
           ATTEMPT: ${{ github.run_attempt }}
@@ -236,8 +312,8 @@ jobs:
       - name: Publish Immutable SemVer GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.validation.outputs.release_version }}
-          SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
+          VERSION: ${{ needs.authorize.outputs.release_version }}
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
           REPOSITORY: ${{ github.repository }}
           RUN_ID: ${{ github.run_id }}
         run: |
@@ -276,8 +352,8 @@ jobs:
       - name: Publish Release Summary
         if: always()
         env:
-          VERSION: ${{ needs.validation.outputs.release_version }}
-          SOURCE_SHA: ${{ needs.validation.outputs.source_sha }}
+          VERSION: ${{ needs.authorize.outputs.release_version }}
+          SOURCE_SHA: ${{ needs.authorize.outputs.source_sha }}
           REPOSITORY: ${{ github.repository }}
         run: |
           {

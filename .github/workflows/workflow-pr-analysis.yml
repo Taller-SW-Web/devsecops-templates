@@ -20,20 +20,116 @@ on:
       sonar_host_url:
         required: true
         type: string
+      report_retention_days:
+        description: Retention for QA evidence (integration, performance, DAST, E2E)
+        type: number
+        default: 14
+      app_jar_pattern:
+        description: Maven - JAR produced by build_test used by performance and DAST
+        type: string
+        default: '*.jar'
+      app_health_path:
+        description: Maven - health endpoint of the ephemeral local instance
+        type: string
+        default: /actuator/health
+      app_boot_args:
+        description: Maven - extra arguments for the ephemeral local instance (space/newline separated)
+        type: string
+        default: ''
+      integration_script:
+        description: Maven - caller script that runs integration tests (required when policy enables integration)
+        type: string
+        default: ''
+      integration_postgres_db:
+        description: Maven - database name of the ephemeral PostgreSQL 16 service
+        type: string
+        default: integration
+      integration_report_paths:
+        description: Maven - report paths uploaded as integration-reports-<attempt>
+        type: string
+        default: target/integration-reports/
+      performance_script:
+        description: Maven - caller Node script that runs the load smoke and writes target/performance
+        type: string
+        default: ''
+      dast_token_script:
+        description: Maven - optional caller Node script that prints an ephemeral test JWT for the local instance
+        type: string
+        default: ''
+      dast_preflight_path:
+        description: Maven - optional authenticated route checked before the ZAP scan
+        type: string
+        default: ''
+      dast_rules_file:
+        description: Maven - ZAP rules file in the caller repository
+        type: string
+        default: .zap/api-scan-rules.tsv
+      dast_summary_script:
+        description: Maven - caller Node script that summarizes the ZAP report
+        type: string
+        default: ''
+      e2e_script:
+        description: Node - caller Playwright script (required when policy enables E2E)
+        type: string
+        default: ''
     secrets:
       SONAR_TOKEN:
         required: false
+    outputs:
+      decision:
+        description: GO or NO-GO from pr-gate
+        value: ${{ jobs.pr-gate.outputs.decision }}
+      policy_profile:
+        description: Policy profile evaluated by analysis-validator
+        value: ${{ jobs.policy.outputs.policy_profile }}
 permissions:
   contents: read
 jobs:
-  build_test:
-    name: Build, Unit Tests and Policy
+  policy:
+    name: Analysis Policy
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     outputs:
-      blocking: ${{ steps.policy.outputs.blocking }}
+      policy_profile: ${{ steps.policy.outputs.policy_profile }}
+      run_build_test: ${{ steps.policy.outputs.run_build_test }}
+      run_sonar: ${{ steps.policy.outputs.run_sonar }}
+      run_sonar_gate: ${{ steps.policy.outputs.run_sonar_gate }}
+      run_codeql: ${{ steps.policy.outputs.run_codeql }}
+      run_dependency_review: ${{ steps.policy.outputs.run_dependency_review }}
+      run_full_sca: ${{ steps.policy.outputs.run_full_sca }}
+      run_secret_scan: ${{ steps.policy.outputs.run_secret_scan }}
+      run_integration: ${{ steps.policy.outputs.run_integration }}
+      run_performance: ${{ steps.policy.outputs.run_performance }}
+      run_dast: ${{ steps.policy.outputs.run_dast }}
+      run_e2e: ${{ steps.policy.outputs.run_e2e }}
       codeql_language: ${{ steps.policy.outputs.codeql_language }}
       codeql_build_mode: ${{ steps.policy.outputs.codeql_build_mode }}
+      required_checks_json: ${{ steps.policy.outputs.required_checks_json }}
+    steps:
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
+      - name: Validate Analysis Context
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          LANGUAGE: ${{ inputs.language }}
+        run: bash .devsecops-templates/scripts/analysis/validate-pr-context.sh
+      - name: Select Analyses and Required Checks
+        id: policy
+        uses: Taller-SW-Web/github-actions/analysis-validator@main
+        with:
+          technology: ${{ inputs.technology }}
+          language: ${{ inputs.language }}
+  build_test:
+    name: Build, Unit Tests and Coverage
+    needs: policy
+    if: needs.policy.outputs.run_build_test == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,16 +141,6 @@ jobs:
           ref: main
           path: .devsecops-templates
           persist-credentials: false
-      - name: Validate Analysis Context and Policy
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          LANGUAGE: ${{ inputs.language }}
-        run: bash .devsecops-templates/scripts/analysis/validate-pr-context.sh
-      - uses: Taller-SW-Web/github-actions/analysis-validator@main
-        id: policy
-        with:
-          technology: ${{ inputs.technology }}
-          language: ${{ inputs.language }}
       - uses: actions/setup-java@v4
         if: inputs.technology == 'maven'
         with:
@@ -92,8 +178,8 @@ jobs:
           retention-days: 14
   sonar_analysis:
     name: SonarQube - SAST and Code Quality
-    needs: [build_test]
-    if: needs.build_test.result == 'success'
+    needs: [policy, build_test]
+    if: needs.policy.outputs.run_sonar == 'true' && needs.build_test.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     outputs:
@@ -187,8 +273,8 @@ jobs:
         run: bash .devsecops-templates/scripts/analysis/record-analysis-outcome.sh
   sonar_gate:
     name: SonarQube - Quality Gate and Metrics
-    needs: [build_test, sonar_analysis]
-    if: ${{ !cancelled() && needs.build_test.result == 'success' && needs.sonar_analysis.outputs.outcome == 'success' }}
+    needs: [policy, build_test, sonar_analysis]
+    if: ${{ !cancelled() && needs.policy.outputs.run_sonar_gate == 'true' && needs.build_test.result == 'success' && needs.sonar_analysis.outputs.outcome == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -230,8 +316,8 @@ jobs:
         run: bash .devsecops-templates/scripts/analysis/record-analysis-outcome.sh
   ghas_sast:
     name: GHAS - SAST / CodeQL (${{ inputs.language }})
-    needs: build_test
-    if: needs.build_test.result == 'success'
+    needs: [policy, build_test]
+    if: needs.policy.outputs.run_codeql == 'true' && needs.build_test.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -262,8 +348,8 @@ jobs:
       - name: Initialize Language-Specific CodeQL Analysis
         uses: github/codeql-action/init@v4
         with:
-          languages: ${{ needs.build_test.outputs.codeql_language }}
-          build-mode: ${{ needs.build_test.outputs.codeql_build_mode }}
+          languages: ${{ needs.policy.outputs.codeql_language }}
+          build-mode: ${{ needs.policy.outputs.codeql_build_mode }}
           queries: security-extended
       - name: Extract Compiled Java Code
         if: inputs.technology == 'maven'
@@ -299,8 +385,8 @@ jobs:
         run: bash .devsecops-templates/scripts/analysis/record-analysis-outcome.sh
   ghas_sca:
     name: GHAS - SCA / Dependency Review
-    needs: build_test
-    if: ${{ github.event_name == 'pull_request' && needs.build_test.result == 'success' }}
+    needs: [policy, build_test]
+    if: needs.policy.outputs.run_dependency_review == 'true' && needs.build_test.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
@@ -372,6 +458,8 @@ jobs:
         run: bash .devsecops-templates/scripts/analysis/record-job-outcome.sh
   supply_chain:
     name: Secrets and Full SCA
+    needs: policy
+    if: needs.policy.outputs.run_full_sca == 'true' || needs.policy.outputs.run_secret_scan == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -381,6 +469,7 @@ jobs:
           persist-credentials: false
       - name: Detect Secrets (Redacted)
         id: secrets
+        if: needs.policy.outputs.run_secret_scan == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -422,7 +511,7 @@ jobs:
           exit $RC
       - name: SCA Maven (Trivy Filesystem)
         id: maven
-        if: ${{ !cancelled() && inputs.technology == 'maven' }}
+        if: ${{ !cancelled() && needs.policy.outputs.run_full_sca == 'true' && inputs.technology == 'maven' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -437,13 +526,13 @@ jobs:
             fs /workspace --scanners vuln --severity HIGH,CRITICAL --format json --output /out/trivy-sca.json --exit-code 0
           echo "trivy_done=true" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v4
-        if: ${{ !cancelled() && inputs.technology == 'node' }}
+        if: ${{ !cancelled() && needs.policy.outputs.run_full_sca == 'true' && inputs.technology == 'node' }}
         with:
           node-version: '22.22.2'
           cache: npm
       - name: SCA npm (Audit Lockfile)
         id: npm
-        if: ${{ !cancelled() && inputs.technology == 'node' }}
+        if: ${{ !cancelled() && needs.policy.outputs.run_full_sca == 'true' && inputs.technology == 'node' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -460,6 +549,8 @@ jobs:
           MAVEN_OUTCOME: ${{ steps.maven.outcome }}
           NPM_OUTCOME: ${{ steps.npm.outcome }}
           TECHNOLOGY: ${{ inputs.technology }}
+          SECRET_REQUIRED: ${{ needs.policy.outputs.run_secret_scan }}
+          SCA_REQUIRED: ${{ needs.policy.outputs.run_full_sca }}
         with:
           script: |
             const fs = require('node:fs');
@@ -534,12 +625,17 @@ jobs:
               .write();
 
             // ── Decisión de bloqueo ──────────────────────────────────────────────────
-            const fatal = secretStatus !== 'success' || scaBlocking || scaStatus === 'failure';
+            // Un control exigido por la politica que no termino en success bloquea (incluido skipped).
+            const secretRequired = process.env.SECRET_REQUIRED === 'true';
+            const scaRequired = process.env.SCA_REQUIRED === 'true';
+            const secretFailed = secretRequired ? secretStatus !== 'success' : !['success', 'skipped', ''].includes(secretStatus);
+            const scaFailed = scaStatus === 'failure' || (scaRequired && scaStatus !== 'success');
+            const fatal = secretFailed || scaBlocking || scaFailed;
             if (fatal) {
               const reasons = [];
-              if (secretStatus !== 'success') reasons.push('Gitleaks detectó secretos o falló');
+              if (secretFailed) reasons.push('Gitleaks detectó secretos o falló');
               if (scaBlocking)                reasons.push(`Trivy/npm-audit: ${criticalCount} CRITICAL detectadas`);
-              if (scaStatus === 'failure')    reasons.push('SCA no pudo completar el análisis');
+              if (scaFailed)                  reasons.push('SCA no pudo completar el análisis');
               core.setFailed(`Supply Chain BLOQUEADO: ${reasons.join(' | ')}`);
             }
       - uses: actions/upload-artifact@v4
@@ -573,3 +669,339 @@ jobs:
           name: pr-security-report-${{ github.run_attempt }}
           path: pr-security-report.md
           retention-days: 14
+  integration:
+    name: Integration (H2 and PostgreSQL)
+    needs: [policy, build_test]
+    if: needs.policy.outputs.run_integration == 'true' && needs.build_test.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ${{ inputs.integration_postgres_db }}
+          POSTGRES_USER: ci_integration
+          POSTGRES_PASSWORD: solo-ci-efimero  # NOSONAR — contraseña efímera de BD de CI, no productiva
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci_integration"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.2'
+      - name: Validate Integration Script Path
+        env:
+          QA_LABEL: integration_script
+          QA_PATH: ${{ inputs.integration_script }}
+        run: bash .devsecops-templates/scripts/qa/validate-qa-path.sh
+      - name: Integration Suite (Caller Script, H2 and Ephemeral PostgreSQL)
+        env:
+          INTEGRATION_SCRIPT: ${{ inputs.integration_script }}
+          CI_POSTGRES_URL: jdbc:postgresql://localhost:5432/${{ inputs.integration_postgres_db }}
+          CI_POSTGRES_USER: ci_integration
+          CI_POSTGRES_PASSWORD: solo-ci-efimero  # NOSONAR — contraseña efímera de BD de CI, no productiva
+        run: bash "$INTEGRATION_SCRIPT"
+      - name: Publish Integration Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-reports-${{ github.run_attempt }}
+          path: ${{ inputs.integration_report_paths }}
+          if-no-files-found: error
+          retention-days: ${{ inputs.report_retention_days }}
+  performance:
+    name: Performance (Load Smoke)
+    needs: [policy, build_test]
+    if: needs.policy.outputs.run_performance == 'true' && needs.build_test.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OUT_DIR: target/performance
+      APP_JAR_PATTERN: ${{ inputs.app_jar_pattern }}
+      APP_HEALTH_PATH: ${{ inputs.app_health_path }}
+      APP_BOOT_ARGS: ${{ inputs.app_boot_args }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.2'
+      - name: Validate Performance Script Path
+        env:
+          QA_LABEL: performance_script
+          QA_PATH: ${{ inputs.performance_script }}
+        run: bash .devsecops-templates/scripts/qa/validate-qa-path.sh
+      - name: Download Compiled JAR from build_test
+        uses: actions/download-artifact@v4
+        with:
+          name: build-coverage-${{ github.run_attempt }}
+          path: .
+      - name: Boot Ephemeral Local Instance
+        run: bash .devsecops-templates/scripts/qa/boot-app.sh
+      - name: Run Load Test (Caller Script)
+        env:
+          PERFORMANCE_SCRIPT: ${{ inputs.performance_script }}
+        run: node "$PERFORMANCE_SCRIPT"
+      - name: Stop Ephemeral Instance
+        if: always()
+        run: bash .devsecops-templates/scripts/qa/stop-app.sh
+      - name: Publish Performance Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-${{ github.run_attempt }}
+          path: target/performance/
+          if-no-files-found: error
+          retention-days: ${{ inputs.report_retention_days }}
+      - name: Performance Summary
+        if: always()
+        run: |
+          if test -f target/performance/informe.md; then
+            cat target/performance/informe.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Performance measurement did not complete.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+  dast:
+    name: DAST API Scan (OWASP ZAP)
+    needs: [policy, build_test]
+    if: needs.policy.outputs.run_dast == 'true' && needs.build_test.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      OUT_DIR: target/zap
+      HEALTH_OUTPUT: target/zap/health.json
+      APP_JAR_PATTERN: ${{ inputs.app_jar_pattern }}
+      APP_HEALTH_PATH: ${{ inputs.app_health_path }}
+      APP_BOOT_ARGS: ${{ inputs.app_boot_args }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.2'
+      - name: Validate DAST Paths
+        env:
+          RULES_FILE: ${{ inputs.dast_rules_file }}
+          SUMMARY_SCRIPT: ${{ inputs.dast_summary_script }}
+          TOKEN_SCRIPT: ${{ inputs.dast_token_script }}
+          PREFLIGHT_PATH: ${{ inputs.dast_preflight_path }}
+        run: |
+          set -euo pipefail
+          QA_LABEL=dast_rules_file QA_PATH="$RULES_FILE" bash .devsecops-templates/scripts/qa/validate-qa-path.sh
+          QA_LABEL=dast_summary_script QA_PATH="$SUMMARY_SCRIPT" bash .devsecops-templates/scripts/qa/validate-qa-path.sh
+          if [ -n "$TOKEN_SCRIPT" ]; then
+            QA_LABEL=dast_token_script QA_PATH="$TOKEN_SCRIPT" bash .devsecops-templates/scripts/qa/validate-qa-path.sh
+          fi
+          if [[ -n "$PREFLIGHT_PATH" && ! "$PREFLIGHT_PATH" =~ ^/[A-Za-z0-9._/-]*$ ]]; then
+            echo '::error::dast_preflight_path invalido'
+            exit 1
+          fi
+      - name: Download Compiled JAR from build_test
+        uses: actions/download-artifact@v4
+        with:
+          name: build-coverage-${{ github.run_attempt }}
+          path: .
+      - name: Boot Ephemeral Local Instance
+        run: bash .devsecops-templates/scripts/qa/boot-app.sh
+      - name: Generate Ephemeral Test JWT (Caller Script)
+        id: token_prueba
+        env:
+          TOKEN_SCRIPT: ${{ inputs.dast_token_script }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TOKEN_SCRIPT" ]; then
+            echo "value=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          token="$(node "$TOKEN_SCRIPT")"
+          test -n "$token"
+          echo "::add-mask::$token"
+          echo "value=$token" >> "$GITHUB_OUTPUT"
+      - name: Preflight OpenAPI and Authenticated Route
+        env:
+          DAST_TOKEN: ${{ steps.token_prueba.outputs.value }}
+          PREFLIGHT_PATH: ${{ inputs.dast_preflight_path }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent http://127.0.0.1:8080/v3/api-docs > target/zap/openapi.json
+          if [ -n "$PREFLIGHT_PATH" ]; then
+            curl --fail --silent \
+              --header "Authorization: Bearer $DAST_TOKEN" \
+              "http://127.0.0.1:8080${PREFLIGHT_PATH}" > target/zap/preflight-perfil.json
+          fi
+      - name: OWASP ZAP Active API Scan
+        id: zap
+        uses: zaproxy/action-api-scan@5158fe4d9d8fcc75ea204db81317cce7f9e5453d # v0.10.0
+        env:
+          ZAP_AUTH_HEADER: ${{ steps.token_prueba.outputs.value != '' && 'Authorization' || '' }}
+          ZAP_AUTH_HEADER_VALUE: ${{ steps.token_prueba.outputs.value != '' && format('Bearer {0}', steps.token_prueba.outputs.value) || '' }}
+          ZAP_AUTH_HEADER_SITE: http://127.0.0.1:8080
+        with:
+          target: http://127.0.0.1:8080/v3/api-docs
+          format: openapi
+          docker_name: ghcr.io/zaproxy/zaproxy:stable
+          rules_file_name: ${{ inputs.dast_rules_file }}
+          cmd_options: -I -T 15
+          fail_action: true
+          allow_issue_writing: false
+          artifact_name: zap-api-scan-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Summarize ZAP Report (Caller Script)
+        if: always()
+        env:
+          SUMMARY_SCRIPT: ${{ inputs.dast_summary_script }}
+          ZAP_OUTCOME: ${{ steps.zap.outcome }}
+        run: |
+          set +e
+          image_reference="$(docker image inspect ghcr.io/zaproxy/zaproxy:stable --format '{{index .RepoDigests 0}}' 2>/dev/null)"
+          node "$SUMMARY_SCRIPT" \
+            --report report_json.json \
+            --output target/zap/resumen.md \
+            --sha "$GITHUB_SHA" \
+            --outcome "$ZAP_OUTCOME" \
+            --image "$image_reference"
+          resumen_status=$?
+          for report in report_html.html report_json.json report_md.md; do
+            if test -f "$report"; then
+              cp "$report" target/zap/"$report"
+            fi
+          done
+          exit "$resumen_status"
+      - name: Publish DAST Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dast-zap-${{ github.run_attempt }}
+          path: target/zap/
+          if-no-files-found: warn
+          retention-days: ${{ inputs.report_retention_days }}
+      - name: Stop Ephemeral Instance
+        if: always()
+        run: bash .devsecops-templates/scripts/qa/stop-app.sh
+  e2e:
+    name: E2E (Playwright)
+    needs: [policy, build_test]
+    if: needs.policy.outputs.run_e2e == 'true' && needs.build_test.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout Shared Shell Scripts
+        uses: actions/checkout@v4
+        with:
+          repository: Taller-SW-Web/devsecops-templates
+          ref: main
+          path: .devsecops-templates
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.2'
+          cache: npm
+      - name: Validate E2E Script Path
+        env:
+          QA_LABEL: e2e_script
+          QA_PATH: ${{ inputs.e2e_script }}
+        run: bash .devsecops-templates/scripts/qa/validate-qa-path.sh
+      - run: npm ci
+      - name: Build Candidate for Intercepted API
+        env:
+          VITE_USE_MOCKS: 'false'
+          VITE_API_URL: http://127.0.0.1:4173
+        run: npm run build
+      - name: Install Isolated Playwright Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/playwright" --save-exact playwright@1.58.2
+          node "$RUNNER_TEMP/playwright/node_modules/playwright/cli.js" install --with-deps chromium
+      - name: Run E2E Scenarios (Caller Script)
+        env:
+          PLAYWRIGHT_ROOT: ${{ runner.temp }}/playwright
+          E2E_SCRIPT: ${{ inputs.e2e_script }}
+        run: |
+          set -euo pipefail
+          npm run preview -- --host 127.0.0.1 --port 4173 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          ready=false
+          for i in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:4173/ >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          node "$E2E_SCRIPT"
+      - name: Publish E2E Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-pos-${{ github.run_attempt }}
+          path: reports/e2e/
+          if-no-files-found: error
+          retention-days: ${{ inputs.report_retention_days }}
+  pr-gate:
+    name: pr-gate
+    needs: [policy, build_test, sonar_analysis, sonar_gate, ghas_sast, ghas_sca, supply_chain, integration, performance, dast, e2e]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      decision: ${{ steps.gate.outputs.decision }}
+    steps:
+      - name: Evaluate Required Checks for This Profile
+        id: gate
+        uses: Taller-SW-Web/github-actions/security-report@main
+        with:
+          mode: gate
+          results: ${{ toJSON(needs) }}
+          required_checks: ${{ needs.policy.outputs.required_checks_json }}
+          profile: ${{ needs.policy.outputs.policy_profile }}
+      - name: Publish Gate Result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-gate-${{ github.run_attempt }}
+          path: gate-result.json
+          if-no-files-found: error
+          retention-days: ${{ inputs.report_retention_days }}
