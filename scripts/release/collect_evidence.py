@@ -59,12 +59,20 @@ def collect(
                 'status': 'success',
             })
 
-    add_report('build', 'ci/build-report.xml', ('surefire-reports/*.xml', 'reports/vitest.xml', 'coverage/lcov.info'))
+    add_report('build', 'ci/build-report.xml', ('surefire-reports/*.xml', 'reports/vitest.xml', 'vitest.xml'))
     add_report('sast', 'security/sast/sonar-quality-gate.json', ('sonar-quality-gate.json',))
     add_report('sca', 'security/sca/sca-report.json', ('trivy-sca.json', 'dependency-check-report.json', 'npm-audit.json', 'dependency-review.json'))
     add_report('secrets', 'security/secrets/summary.json', ('summary.json',))
-    add_report('integration', 'integration/integration-report.xml', ('integration-reports/*.xml', 'postgres-reports/*.xml', 'reports/vitest.xml'))
-    add_report('performance', 'performance/perf-summary.json', ('target/performance/*.json', 'e2e-pos.json', 'reports/e2e/*.json'))
+    add_report('integration', 'integration/integration-report.xml', ('integration-reports/*.xml', 'postgres-reports/*.xml', 'reports/vitest.xml', 'vitest.xml'))
+    add_report('performance', 'performance/perf-summary.json', (
+        'performance-*/resultados.json',
+        'performance-*/*.json',
+        'target/performance/*.json',
+        'e2e-pos-*/resultados.json',
+        'e2e-pos-*/*.json',
+        'reports/e2e/*.json',
+        'e2e-pos.json',
+    ))
 
     # Deploy & health metadata
     deploy_meta_src = _find_first(artifacts_dir, ('deploy-meta.json',))
@@ -148,6 +156,12 @@ if __name__ == '__main__':
         args.run_id,
         args.attempt,
     )
+    print(json.dumps({
+        'decision': manifest['decision'],
+        'branch': manifest['branch'],
+        'deployment': manifest['deployment'],
+        'reports': [r['kind'] for r in manifest['reports']],
+    }, indent=2))
     out = Path(args.output_manifest)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(manifest, indent=2), encoding='utf-8')

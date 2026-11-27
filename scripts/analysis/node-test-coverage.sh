@@ -14,9 +14,15 @@ ln -s "$COVERAGE_PREFIX/node_modules/@vitest/coverage-v8" node_modules/@vitest/c
 if [ ! -e "$COVERAGE_PREFIX/node_modules/vitest" ]; then
   ln -s "$PWD/node_modules/vitest" "$COVERAGE_PREFIX/node_modules/vitest"
 fi
-npm test -- --coverage --coverage.reporter=lcov '--coverage.include=src/**/*.{ts,tsx}'
+mkdir -p reports
+npm test -- --coverage --coverage.reporter=lcov '--coverage.include=src/**/*.{ts,tsx}' \
+  --reporter=default --reporter=junit --outputFile.junit=reports/vitest.xml
 
 test -s coverage/lcov.info || {
   echo '::error::Vitest did not produce coverage/lcov.info'
+  exit 1
+}
+test -s reports/vitest.xml || {
+  echo '::error::Vitest did not produce reports/vitest.xml'
   exit 1
 }

@@ -56,6 +56,29 @@ class CollectEvidenceTest(unittest.TestCase):
             self.assertEqual(manifest['decision'], 'GO')
             self.assertEqual(len(manifest['reports']), 7)
 
+    def test_upload_artifact_flattened_performance_and_e2e_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            art = Path(tmp) / 'artifacts'
+            (art / 'build-coverage-1/target/surefire-reports').mkdir(parents=True)
+            (art / 'build-coverage-1/target/surefire-reports/TEST-pos.xml').write_text('<testsuite tests="1"/>', encoding='utf-8')
+            (art / 'sonar-quality-gate-1').mkdir(parents=True)
+            (art / 'sonar-quality-gate-1/sonar-quality-gate.json').write_text('{"status":"OK"}', encoding='utf-8')
+            (art / 'supply-chain-1').mkdir(parents=True)
+            (art / 'supply-chain-1/trivy-sca.json').write_text('{"Results":[]}', encoding='utf-8')
+            (art / 'supply-chain-1/summary.json').write_text('{"secrets":"success"}', encoding='utf-8')
+            (art / 'integration-reports-1/integration-reports').mkdir(parents=True)
+            (art / 'integration-reports-1/integration-reports/TEST-int.xml').write_text('<testsuite tests="1"/>', encoding='utf-8')
+            (art / 'performance-1').mkdir(parents=True)
+            (art / 'performance-1/resultados.json').write_text('{"p95":120}', encoding='utf-8')
+            (art / 'deploy-meta-1').mkdir(parents=True)
+            (art / 'deploy-meta-1/deploy-meta.json').write_text(json.dumps({'id': 'dep-1', 'status': 'success', 'identity': 'provider-source'}), encoding='utf-8')
+            (art / 'deploy-meta-1/health-check.json').write_text(json.dumps({'status': 'success'}), encoding='utf-8')
+
+            ev = Path(tmp) / 'evidence'
+            manifest = collect(art, ev, 'v0.1.0', 'a' * 40, 'Taller-SW-Web/G4-Retail-backend', 'main', 10, 1)
+            self.assertEqual(manifest['decision'], 'GO')
+            self.assertEqual(len(manifest['reports']), 7)
+
 
 if __name__ == '__main__':
     unittest.main()
