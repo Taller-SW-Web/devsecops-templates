@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-test "$EVENT_NAME" = pull_request
+case "$EVENT_NAME" in pull_request|push|workflow_dispatch) ;; *) exit 1 ;; esac
 test -n "$LANGUAGE"

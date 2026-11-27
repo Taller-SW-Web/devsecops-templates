@@ -77,21 +77,35 @@ jobs:
       - uses: actions/setup-node@v4
         if: inputs.technology == 'node'
         with:
-          node-version: '22'
+          node-version: '22.22.2'
           cache: npm
-      - name: Build and Test Maven Application
+      - name: Build y cobertura Maven
         if: inputs.technology == 'maven'
-        run: bash .devsecops-templates/scripts/ci/maven-verify.sh
+        run: bash .devsecops-templates/scripts/analysis/maven-test-coverage.sh
       - name: Build and Test Node Application
         if: inputs.technology == 'node'
-        run: bash .devsecops-templates/scripts/ci/run-node-checks.sh
+        run: |
+          bash .devsecops-templates/scripts/analysis/node-test-coverage.sh
+          npm run build
+      - name: Conservar build y cobertura del SHA
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-coverage-${{ github.run_attempt }}
+          path: |
+            target/classes/
+            target/test-classes/
+            target/site/jacoco/
+            target/surefire-reports/
+            coverage/
+            dist/
+          if-no-files-found: error
   sonar_analysis:
     name: SonarQube - SAST and Code Quality
-    needs: validation
+    needs: [validation, build_test]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     # Only the final policy job is required. Raw outcomes are preserved explicitly.
-    continue-on-error: true
     outputs:
       outcome: ${{ steps.outcome.outputs.value }}
     steps:
@@ -135,30 +149,20 @@ jobs:
       - uses: actions/setup-node@v4
         if: inputs.technology == 'node'
         with:
-          node-version: '22'
+          node-version: '22.22.2'
           cache: npm
-      - name: Run Maven Tests and Generate JaCoCo Coverage
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-coverage-${{ github.run_attempt }}
+          path: .
+      - name: Analizar Java con scanner Maven
         if: inputs.technology == 'maven'
-        run: bash .devsecops-templates/scripts/analysis/maven-test-coverage.sh
-      - name: Run Vitest and Generate LCOV Coverage
-        if: inputs.technology == 'node'
-        run: bash .devsecops-templates/scripts/analysis/node-test-coverage.sh
-      - name: SonarQube Java Analysis
-        if: inputs.technology == 'maven'
-        uses: SonarSource/sonarqube-scan-action@v6
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
           SONAR_HOST_URL: ${{ inputs.sonar_host_url }}
-        with:
-          args: >-
-            ${{ steps.project.outputs.organization_argument }}
-            -Dsonar.projectKey=${{ steps.project.outputs.key }}
-            -Dsonar.sources=src/main/java
-            -Dsonar.tests=src/test/java
-            -Dsonar.java.binaries=target/classes
-            -Dsonar.java.libraries=/home/runner/.m2/repository/**/*.jar
-            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
-            -Dsonar.qualitygate.wait=false
+          SONAR_PROJECT_KEY: ${{ steps.project.outputs.key }}
+          SONAR_ORGANIZATION_ARGUMENT: ${{ steps.project.outputs.organization_argument }}
+        run: bash .devsecops-templates/scripts/analysis/maven-sonar.sh
       - name: SonarQube JavaScript and TypeScript Analysis
         if: inputs.technology == 'node'
         uses: SonarSource/sonarqube-scan-action@v6
@@ -177,7 +181,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sonar-task-${{ github.run_attempt }}
-          path: .scannerwork/report-task.txt
+          path: ${{ inputs.technology == 'maven' && 'target/sonar/report-task.txt' || '.scannerwork/report-task.txt' }}
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
@@ -196,7 +200,6 @@ jobs:
     if: ${{ !cancelled() && needs.validation.result == 'success' && needs.sonar_analysis.outputs.outcome == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    continue-on-error: true
     outputs:
       outcome: ${{ steps.outcome.outputs.value }}
       gate: ${{ steps.gate.outputs.gate }}
@@ -239,7 +242,6 @@ jobs:
     needs: validation
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true
     permissions:
       contents: read
       actions: read
@@ -308,11 +310,14 @@ jobs:
     needs: validation
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     outputs:
       outcome: ${{ steps.outcome.outputs.value }}
       vulnerabilities: ${{ steps.export.outputs.vulnerabilities }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Checkout Shared Shell Scripts
         uses: actions/checkout@v4
         with:
@@ -320,10 +325,24 @@ jobs:
           ref: main
           path: .devsecops-templates
           persist-credentials: false
+      - name: Determinar comparaci?n de dependencias
+        id: comparison
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="${PR_BASE:-$BEFORE}"
+          if [[ ! "$base" =~ ^[0-9a-f]{40}$ || "$base" =~ ^0+$ ]]; then
+            base="$(git rev-parse HEAD^)"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
       - name: Review Dependency Changes and Vulnerabilities
         id: review
         uses: actions/dependency-review-action@v4
         with:
+          base-ref: ${{ steps.comparison.outputs.base }}
+          head-ref: ${{ github.sha }}
           fail-on-severity: high
           comment-summary-in-pr: never
           show-patched-versions: true
@@ -358,9 +377,14 @@ jobs:
         env:
           RAW_STATUS: ${{ job.status }}
         run: bash .devsecops-templates/scripts/analysis/record-job-outcome.sh
+  supply_chain:
+    name: Secretos y dependencias completas
+    uses: ./.github/workflows/workflow-supply-chain.yml
+    with:
+      technology: ${{ inputs.technology }}
   status:
     name: Security Policy Result
-    needs: [validation, build_test, sonar_analysis, sonar_gate, ghas_sast, ghas_sca]
+    needs: [validation, build_test, sonar_analysis, sonar_gate, ghas_sast, ghas_sca, supply_chain]
     if: always()
     runs-on: ubuntu-latest
     permissions:
