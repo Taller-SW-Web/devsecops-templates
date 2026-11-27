@@ -7,7 +7,7 @@ mkdir -p reports/deploy
 vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
 vercel build --prod --token="$VERCEL_TOKEN"
 deploy_url="$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN" | tail -n1)"
-node -e '
+DEPLOY_URL="$deploy_url" node -e '
 const fs = require("node:fs");
 const url = process.env.DEPLOY_URL || "";
 fs.writeFileSync("reports/deploy/deploy-meta.json", JSON.stringify({
@@ -19,4 +19,4 @@ fs.writeFileSync("reports/deploy/deploy-meta.json", JSON.stringify({
   identity: "provider-source",
   timestamp_utc: new Date().toISOString()
 }, null, 2));
-' DEPLOY_URL="$deploy_url"
+'

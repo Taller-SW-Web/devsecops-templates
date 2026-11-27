@@ -9,7 +9,7 @@ deploy_id="$(grep -Eo 'id=[a-zA-Z0-9_-]+' reports/deploy/railway-up.log | head -
 if [ -z "$deploy_id" ]; then
   deploy_id="railway-${GITHUB_RUN_ID:-0}-${GITHUB_RUN_ATTEMPT:-1}"
 fi
-node -e '
+DEPLOY_ID="$deploy_id" node -e '
 const fs = require("node:fs");
 fs.writeFileSync("reports/deploy/deploy-meta.json", JSON.stringify({
   provider: "railway",
@@ -20,4 +20,4 @@ fs.writeFileSync("reports/deploy/deploy-meta.json", JSON.stringify({
   identity: "provider-source",
   timestamp_utc: new Date().toISOString()
 }, null, 2));
-' DEPLOY_ID="$deploy_id"
+'
