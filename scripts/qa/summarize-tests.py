@@ -1,4 +1,5 @@
 """Summarize actual JUnit and coverage files without converting failures to success."""
+from html import escape
 import argparse
 import os
 from pathlib import Path
@@ -10,14 +11,23 @@ def summarize(root, category):
         'target/integration-reports/*.xml', 'target/postgres-reports/*.xml')
     files = sorted({p for pattern in patterns for p in root.glob(pattern)})
     counts = dict(executed=0, passed=0, failed=0, skipped=0)
+    details = []
     for path in files:
         tree = ET.parse(path).getroot()
+        details.append(f'<details><summary>{escape(str(path.relative_to(root)))}</summary>\n<pre>')
         for case in tree.iter('testcase'):
+            status = next((tag for tag in ('error', 'failure', 'skipped') if case.find(tag) is not None), 'passed')
+            suite = case.get('classname', '')
+            name = case.get('name', '(sin nombre)')
+            duration = case.get('time')
+            elapsed = f' · {duration} s' if duration else ''
+            details.append(escape(f'  [{status}] {suite} · {name}{elapsed}'))
             if case.find('skipped') is not None:
                 counts['skipped'] += 1
                 continue
             counts['executed'] += 1
             counts['failed' if case.find('failure') is not None or case.find('error') is not None else 'passed'] += 1
+        details.append('</pre></details>')
     lines = [f'### Pruebas — {category}', '',
              f"Reportes: {len(files)}; ejecutadas: {counts['executed']}; aprobadas: {counts['passed']}; fallidas: {counts['failed']}; omitidas: {counts['skipped']}."]
     if not files:
@@ -40,7 +50,7 @@ def summarize(root, category):
         coverage = 100 * hit / found if found else None
     if category == 'unit':
         lines.append(f'Cobertura real de líneas: {coverage:.2f}%.' if coverage is not None else 'Cobertura: SIN EVIDENCIA.')
-    return '\n'.join(lines) + '\n'
+    return '\n'.join(lines + [''] + details) + '\n'
 
 
 if __name__ == '__main__':
