@@ -727,7 +727,7 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ inputs.report_retention_days }}
   performance:
-    name: Performance (Load Smoke)
+    name: 'PERFORMANCE | Carga POS (RPM, p95/p99, RPS y errores)'
     needs: [policy, build_test]
     if: needs.policy.outputs.run_performance == 'true' && needs.build_test.result == 'success'
     runs-on: ubuntu-latest
@@ -755,26 +755,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.2'
-      - name: Validate Performance Script Path
+      - name: 'PERFORMANCE | Validar el script de carga del repositorio'
         env:
           QA_LABEL: performance_script
           QA_PATH: ${{ inputs.performance_script }}
         run: bash .devsecops-templates/scripts/qa/validate-qa-path.sh
-      - name: Download Compiled JAR from build_test
+      - name: 'PERFORMANCE | Descargar el JAR ya probado (sin recompilar)'
         uses: actions/download-artifact@v4
         with:
           name: build-coverage-${{ github.run_attempt }}
           path: .
-      - name: Boot Ephemeral Local Instance
+      - name: 'PERFORMANCE | Iniciar backend efímero local con H2/mocks'
         run: bash .devsecops-templates/scripts/qa/boot-app.sh
-      - name: Run Load Test (Caller Script)
+      - name: 'PERFORMANCE | Ejecutar escenarios y calcular percentiles/throughput'
         env:
           PERFORMANCE_SCRIPT: ${{ inputs.performance_script }}
         run: node "$PERFORMANCE_SCRIPT"
-      - name: Stop Ephemeral Instance
+      - name: 'PERFORMANCE | Detener backend efímero (limpieza garantizada)'
         if: always()
         run: bash .devsecops-templates/scripts/qa/stop-app.sh
-      - name: Publish Performance Reports
+      - name: 'PERFORMANCE | Publicar JSON, informe y logs como evidencia'
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -782,7 +782,7 @@ jobs:
           path: target/performance/
           if-no-files-found: error
           retention-days: ${{ inputs.report_retention_days }}
-      - name: Performance Summary
+      - name: 'PERFORMANCE | Mostrar resultado explicado en el resumen del run'
         if: always()
         run: |
           if test -f target/performance/informe.md; then
