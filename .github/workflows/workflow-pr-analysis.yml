@@ -86,7 +86,7 @@ permissions:
   contents: read
 jobs:
   policy:
-    name: Analysis Policy
+    name: Política CI/CD y selección de controles
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -106,7 +106,7 @@ jobs:
       codeql_build_mode: ${{ steps.policy.outputs.codeql_build_mode }}
       required_checks_json: ${{ steps.policy.outputs.required_checks_json }}
     steps:
-      - name: Checkout Shared Shell Scripts
+      - name: Obtener scripts centrales de CI/CD
         uses: actions/checkout@v4
         with:
           repository: Taller-SW-Web/devsecops-templates
@@ -125,7 +125,7 @@ jobs:
           technology: ${{ inputs.technology }}
           language: ${{ inputs.language }}
   build_test:
-    name: Build, Unit Tests and Coverage
+    name: Compilación, pruebas unitarias y cobertura
     needs: policy
     if: needs.policy.outputs.run_build_test == 'true'
     runs-on: ubuntu-latest
@@ -134,7 +134,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Checkout Shared Shell Scripts
+      - name: Obtener scripts centrales de CI/CD
         uses: actions/checkout@v4
         with:
           repository: Taller-SW-Web/devsecops-templates
@@ -160,6 +160,9 @@ jobs:
         run: |
           bash .devsecops-templates/scripts/analysis/node-test-coverage.sh
           npm run build
+      - name: Resumir resultados reales de unit
+        if: always()
+        run: python3 .devsecops-templates/scripts/qa/summarize-tests.py --category unit
       - name: Publish Build, JAR/Dist and Coverage Artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -177,7 +180,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   sonar_analysis:
-    name: SonarQube - SAST and Code Quality
+    name: Calidad del código — SonarCloud
     needs: [policy, build_test]
     if: needs.policy.outputs.run_sonar == 'true' && needs.build_test.result == 'success'
     runs-on: ubuntu-latest
@@ -189,7 +192,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Checkout Shared Shell Scripts
+      - name: Obtener scripts centrales de CI/CD
         uses: actions/checkout@v4
         with:
           repository: Taller-SW-Web/devsecops-templates
@@ -272,7 +275,7 @@ jobs:
             Execution: **${{ job.status }}**. Quality Gate is evaluated separately.
         run: bash .devsecops-templates/scripts/analysis/record-analysis-outcome.sh
   sonar_gate:
-    name: SonarQube - Quality Gate and Metrics
+    name: Quality Gate y métricas — SonarCloud
     needs: [policy, build_test, sonar_analysis]
     if: ${{ !cancelled() && needs.policy.outputs.run_sonar_gate == 'true' && needs.build_test.result == 'success' && needs.sonar_analysis.outputs.outcome == 'success' }}
     runs-on: ubuntu-latest
@@ -281,7 +284,7 @@ jobs:
       outcome: ${{ steps.outcome.outputs.value }}
       gate: ${{ steps.gate.outputs.gate }}
     steps:
-      - name: Checkout Shared Shell Scripts
+      - name: Obtener scripts centrales de CI/CD
         uses: actions/checkout@v4
         with:
           repository: Taller-SW-Web/devsecops-templates
@@ -292,14 +295,14 @@ jobs:
         with:
           name: sonar-task-${{ github.run_attempt }}
           path: sonar-task
-      - name: Evaluate Quality Gate for This Analysis
+      - name: Comprobar Quality Gate de SonarCloud
         id: gate
         uses: Taller-SW-Web/github-actions/security-report@main
         with:
           mode: sonar
           sonar_host_url: ${{ inputs.sonar_host_url }}
           sonar_token: ${{ secrets.SONAR_TOKEN }}
-      - name: Publish Quality Gate Report
+      - name: Publicar resultado de Quality Gate
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -315,7 +318,7 @@ jobs:
             Quality Gate execution: **${{ job.status }}**. If no metrics were produced, inspect the API/configuration error in this job.
         run: bash .devsecops-templates/scripts/analysis/record-analysis-outcome.sh
   ghas_sast:
-    name: GHAS - SAST / CodeQL (${{ inputs.language }})
+    name: Seguridad estática — CodeQL (${{ inputs.language }})
     needs: [policy, build_test]
     if: needs.policy.outputs.run_codeql == 'true' && needs.build_test.result == 'success'
     runs-on: ubuntu-latest
@@ -332,7 +335,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Checkout Shared Shell Scripts
+      - name: Obtener scripts centrales de CI/CD
         uses: actions/checkout@v4
         with:
           repository: Taller-SW-Web/devsecops-templates
@@ -384,7 +387,7 @@ jobs:
             GHAS SAST execution: **${{ job.status }}**. SARIF, when generated, is attached to this run.
         run: bash .devsecops-templates/scripts/analysis/record-analysis-outcome.sh
   ghas_sca:
-    name: GHAS - SCA / Dependency Review
+    name: Revisión de dependencias del PR
     needs: [policy, build_test]
     if: needs.policy.outputs.run_dependency_review == 'true' && needs.build_test.result == 'success'
     runs-on: ubuntu-latest
@@ -397,7 +400,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Checkout Shared Shell Scripts
+      - name: Obtener scripts centrales de CI/CD
         uses: actions/checkout@v4
         with:
           repository: Taller-SW-Web/devsecops-templates
@@ -457,7 +460,7 @@ jobs:
           RAW_STATUS: ${{ job.status }}
         run: bash .devsecops-templates/scripts/analysis/record-job-outcome.sh
   supply_chain:
-    name: Secrets and Full SCA
+    name: Dependencias y secretos — Trivy / Gitleaks
     needs: policy
     if: needs.policy.outputs.run_full_sca == 'true' || needs.policy.outputs.run_secret_scan == 'true'
     runs-on: ubuntu-latest
@@ -647,14 +650,26 @@ jobs:
           retention-days: 14
   status:
     name: Security Policy Result
-    needs: [build_test, sonar_analysis, sonar_gate, ghas_sast, ghas_sca, supply_chain]
+    needs: [pr-gate, build_test, sonar_analysis, sonar_gate, ghas_sast, ghas_sca, supply_chain]
     if: always()
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
     steps:
-      - name: Publish Actions Summary and Update PR Comment
+      - name: Comprobar el control integral obligatorio
+        env:
+          GATE_RESULT: ${{ needs.pr-gate.result }}
+          GATE_DECISION: ${{ needs.pr-gate.outputs.decision }}
+        run: |
+          printf '### Control integral — GO / NO-GO\n\nResultado: %s\n\nDecisión: %s\n' "$GATE_RESULT" "$GATE_DECISION" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$GATE_RESULT" != success ] || [ "$GATE_DECISION" != GO ]; then
+            echo '::error::El control integral no aprobó todos los checks obligatorios del perfil.'
+            exit 1
+          fi
+          echo '::notice::Control integral aprobado.'
+      - name: Publicar resumen de seguridad y actualizar comentario del PR
+        if: always()
         uses: Taller-SW-Web/github-actions/security-report@main
         with:
           mode: pull-request
@@ -670,7 +685,7 @@ jobs:
           path: pr-security-report.md
           retention-days: 14
   integration:
-    name: Integration (H2 and PostgreSQL)
+    name: Integración — H2 y PostgreSQL
     needs: [policy, build_test]
     if: needs.policy.outputs.run_integration == 'true' && needs.build_test.result == 'success'
     runs-on: ubuntu-latest
@@ -691,7 +706,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Checkout Shared Shell Scripts
+      - name: Obtener scripts centrales de CI/CD
         uses: actions/checkout@v4
         with:
           repository: Taller-SW-Web/devsecops-templates
@@ -711,14 +726,17 @@ jobs:
           QA_LABEL: integration_script
           QA_PATH: ${{ inputs.integration_script }}
         run: bash .devsecops-templates/scripts/qa/validate-qa-path.sh
-      - name: Integration Suite (Caller Script, H2 and Ephemeral PostgreSQL)
+      - name: Ejecutar integración con H2 y PostgreSQL efímero
         env:
           INTEGRATION_SCRIPT: ${{ inputs.integration_script }}
           CI_POSTGRES_URL: jdbc:postgresql://localhost:5432/${{ inputs.integration_postgres_db }}
           CI_POSTGRES_USER: ci_integration
           CI_POSTGRES_PASSWORD: solo-ci-efimero  # NOSONAR — contraseña efímera de BD de CI, no productiva
         run: bash "$INTEGRATION_SCRIPT"
-      - name: Publish Integration Reports
+      - name: Resumir resultados reales de integration
+        if: always()
+        run: python3 .devsecops-templates/scripts/qa/summarize-tests.py --category integration
+      - name: Publicar reportes de integración como artefacto
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -741,7 +759,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Checkout Shared Shell Scripts
+      - name: Obtener scripts centrales de CI/CD
         uses: actions/checkout@v4
         with:
           repository: Taller-SW-Web/devsecops-templates
@@ -791,7 +809,7 @@ jobs:
             echo 'Performance measurement did not complete.' >> "$GITHUB_STEP_SUMMARY"
           fi
   dast:
-    name: DAST API Scan (OWASP ZAP)
+    name: Seguridad dinámica — OWASP ZAP
     needs: [policy, build_test]
     if: needs.policy.outputs.run_dast == 'true' && needs.build_test.result == 'success'
     runs-on: ubuntu-latest
@@ -806,7 +824,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Checkout Shared Shell Scripts
+      - name: Obtener scripts centrales de CI/CD
         uses: actions/checkout@v4
         with:
           repository: Taller-SW-Web/devsecops-templates
@@ -907,7 +925,7 @@ jobs:
             fi
           done
           exit "$resumen_status"
-      - name: Publish DAST Evidence
+      - name: Publicar evidencias de OWASP ZAP
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -919,7 +937,7 @@ jobs:
         if: always()
         run: bash .devsecops-templates/scripts/qa/stop-app.sh
   e2e:
-    name: E2E (Playwright)
+    name: Pruebas E2E — Playwright
     needs: [policy, build_test]
     if: needs.policy.outputs.run_e2e == 'true' && needs.build_test.result == 'success'
     runs-on: ubuntu-24.04
@@ -928,7 +946,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Checkout Shared Shell Scripts
+      - name: Obtener scripts centrales de CI/CD
         uses: actions/checkout@v4
         with:
           repository: Taller-SW-Web/devsecops-templates
@@ -954,7 +972,7 @@ jobs:
         run: |
           npm install --prefix "$RUNNER_TEMP/playwright" --save-exact playwright@1.58.2
           node "$RUNNER_TEMP/playwright/node_modules/playwright/cli.js" install --with-deps chromium
-      - name: Run E2E Scenarios (Caller Script)
+      - name: Ejecutar escenarios E2E del POS
         env:
           PLAYWRIGHT_ROOT: ${{ runner.temp }}/playwright
           E2E_SCRIPT: ${{ inputs.e2e_script }}
@@ -970,7 +988,7 @@ jobs:
           done
           test "$ready" = true
           node "$E2E_SCRIPT"
-      - name: Publish E2E Evidence
+      - name: Publicar evidencias E2E de Playwright
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -989,7 +1007,7 @@ jobs:
     outputs:
       decision: ${{ steps.gate.outputs.decision }}
     steps:
-      - name: Evaluate Required Checks for This Profile
+      - name: Evaluar todos los controles obligatorios del perfil
         id: gate
         uses: Taller-SW-Web/github-actions/security-report@main
         with:
@@ -997,7 +1015,7 @@ jobs:
           results: ${{ toJSON(needs) }}
           required_checks: ${{ needs.policy.outputs.required_checks_json }}
           profile: ${{ needs.policy.outputs.policy_profile }}
-      - name: Publish Gate Result
+      - name: Publicar decisión GO / NO-GO
         if: always()
         uses: actions/upload-artifact@v4
         with:

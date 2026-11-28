@@ -3,9 +3,8 @@ import argparse
 import json
 from pathlib import Path
 import shutil
-
-REQUIRED_CATEGORIES = ('build', 'sast', 'sca', 'secrets', 'integration', 'performance', 'go-no-go')
-
+import hashlib
+from datetime import datetime, timezone
 
 def _copy_if_exists(src: Path, dst_root: Path, rel_path: str) -> str | None:
     if not src.is_file():
@@ -34,6 +33,7 @@ def collect(
     branch: str,
     run_id: int,
     attempt: int,
+    technology: str | None = None,
 ) -> dict:
     artifacts_dir = artifacts_dir.resolve()
     evidence_root = evidence_root.resolve()
@@ -42,37 +42,50 @@ def collect(
     reports = []
     missing = []
 
-    def add_report(kind: str, rel_dst: str, patterns: tuple[str, ...]):
-        src = _find_first(artifacts_dir, patterns)
-        if not src:
-            missing.append(kind)
-            return
-        copied = _copy_if_exists(src, evidence_root, rel_dst)
-        if copied:
-            reports.append({
-                'kind': kind,
-                'path': copied,
-                'sha': sha,
-                'repository': repository,
-                'run_id': run_id,
-                'attempt': attempt,
-                'status': 'success',
-            })
+    technology = technology or ('node' if repository.endswith('frontend') else 'maven')
+    if technology not in ('node', 'maven'):
+        raise ValueError('Unsupported technology')
+    gate_src = _find_first(artifacts_dir, ('gate-result.json',))
+    gate = json.loads(gate_src.read_text(encoding='utf-8')) if gate_src else {}
+    gate_valid = (gate.get('decision') == 'GO' and gate.get('sha') == sha
+                  and gate.get('repository') == repository and str(gate.get('run_id')) == str(run_id)
+                  and str(gate.get('run_attempt')) == str(attempt))
+    if not gate_valid:
+        missing.append('verified-gate')
+    timestamp = datetime.now(timezone.utc).isoformat()
 
-    add_report('build', 'ci/build-report.xml', ('surefire-reports/*.xml', 'reports/vitest.xml', 'vitest.xml'))
-    add_report('sast', 'security/sast/sonar-quality-gate.json', ('sonar-quality-gate.json',))
-    add_report('sca', 'security/sca/sca-report.json', ('trivy-sca.json', 'dependency-check-report.json', 'npm-audit.json', 'dependency-review.json'))
-    add_report('secrets', 'security/secrets/summary.json', ('summary.json',))
-    add_report('integration', 'integration/integration-report.xml', ('integration-reports/*.xml', 'postgres-reports/*.xml', 'reports/vitest.xml', 'vitest.xml'))
-    add_report('performance', 'performance/perf-summary.json', (
-        'performance-*/resultados.json',
-        'performance-*/*.json',
-        'target/performance/*.json',
-        'e2e-pos-*/resultados.json',
-        'e2e-pos-*/*.json',
-        'reports/e2e/*.json',
-        'e2e-pos.json',
-    ))
+    def add_report(kind, destination, patterns, job, required=True):
+        sources = sorted({p for pattern in patterns for p in artifacts_dir.rglob(pattern) if p.is_file()})
+        if not sources and required:
+            missing.append(kind)
+        for src in sources:
+            relative = src.relative_to(artifacts_dir).as_posix()
+            copied = _copy_if_exists(src, evidence_root, destination + '/' + relative)
+            status = gate.get('results', {}).get(job, 'unknown')
+            if status != 'success':
+                missing.append(kind + ':unverified-result')
+            reports.append(dict(kind=kind, path=copied, source=relative, sha=sha,
+                repository=repository, run_id=run_id, attempt=attempt, status=status,
+                timestamp=timestamp, version=version, environment='ephemeral CI',
+                checksum=hashlib.sha256(src.read_bytes()).hexdigest()))
+
+    add_report('build', 'tests/unit', ('surefire-reports/*.xml', 'vitest.xml'), 'build_test')
+    add_report('quality', 'quality', ('sonar-quality-gate.json', 'jacoco.xml', 'coverage-summary.json', 'lcov.info'), 'sonar_gate')
+    add_report('sast', 'security/sast', ('*.sarif', 'ghas-sast-*/*.json'), 'ghas_sast')
+    add_report('sca', 'security/sca', ('trivy-sca.json', 'npm-audit.json', 'dependency-review.json'), 'supply_chain')
+    add_report('secrets', 'security/secrets', ('supply-chain-*/summary.json',), 'supply_chain')
+    if technology == 'maven':
+        add_report('integration', 'tests/integration', ('integration-reports/*.xml',), 'integration')
+        add_report('integration', 'tests/integration', ('postgres-reports/*.xml',), 'integration')
+        add_report('performance', 'tests/performance', ('performance-*/*.json', 'performance-*/*.md', 'target/performance/*.json'), 'performance')
+        add_report('dast', 'security/dast', ('dast-zap-*/*.json', 'dast-zap-*/*.md'), 'dast')
+    else:
+        add_report('e2e', 'tests/e2e', ('e2e-pos-*/*.json', 'e2e-pos-*/*.xml', 'e2e-pos-*/*.md'), 'e2e')
+    if gate_src:
+        _copy_if_exists(gate_src, evidence_root, 'manifest/gate-result.json')
+        reports.append(dict(kind='gate', path='manifest/gate-result.json', sha=sha,
+            repository=repository, run_id=run_id, attempt=attempt,
+            status='success' if gate_valid else 'failure'))
 
     # Deploy & health metadata
     deploy_meta_src = _find_first(artifacts_dir, ('deploy-meta.json',))
@@ -81,11 +94,15 @@ def collect(
     health_meta = json.loads(health_src.read_text(encoding='utf-8')) if health_src else {}
 
     if deploy_meta_src:
-        _copy_if_exists(deploy_meta_src, evidence_root, 'deploy/deploy-meta.json')
+        _copy_if_exists(deploy_meta_src, evidence_root, 'deployment/deploy-meta.json')
     if health_src:
-        _copy_if_exists(health_src, evidence_root, 'deploy/health-check.json')
+        _copy_if_exists(health_src, evidence_root, 'deployment/health-check.json')
 
-    decision = 'GO' if (not missing and health_meta.get('status') == 'success' and deploy_meta.get('id')) else 'NO-GO'
+    for name, source in [('deploy-meta.json', deploy_meta_src), ('health-check.json', health_src)]:
+        if source:
+            reports.append(dict(kind='deployment', path='deployment/' + name, sha=sha, repository=repository, run_id=run_id, attempt=attempt, status=json.loads(source.read_text(encoding='utf-8')).get('status', 'unknown')))
+
+    decision = 'GO' if (not missing and deploy_meta.get('status') == 'success' and health_meta.get('status') == 'success' and deploy_meta.get('id')) else 'NO-GO'
 
     go_no_go = {
         'version': version,
@@ -106,18 +123,25 @@ def collect(
         'collected_reports': [r['kind'] for r in reports],
     }
 
-    go_path = evidence_root / 'release-decision/go-no-go.json'
+    go_path = evidence_root / 'go-no-go.json'
     go_path.parent.mkdir(parents=True, exist_ok=True)
     go_path.write_text(json.dumps(go_no_go, indent=2), encoding='utf-8')
     reports.append({
         'kind': 'go-no-go',
-        'path': 'release-decision/go-no-go.json',
+        'path': 'go-no-go.json',
         'sha': sha,
         'repository': repository,
         'run_id': run_id,
         'attempt': attempt,
         'status': 'success' if decision == 'GO' else 'failure',
     })
+
+    for report in reports:
+        report.setdefault('source', report['path'])
+        report.setdefault('timestamp', timestamp)
+        report.setdefault('version', version)
+        report.setdefault('environment', 'production' if report['kind'] == 'deployment' else 'ephemeral CI')
+        report.setdefault('checksum', hashlib.sha256((evidence_root / report['path']).read_bytes()).hexdigest())
 
     manifest = {
         'version': version,
@@ -129,6 +153,8 @@ def collect(
         'decision': decision,
         'deployment': go_no_go['deployment'],
         'reports': reports,
+        'technology': technology,
+        'not_applicable': ['integration', 'performance', 'dast'] if technology == 'node' else ['e2e'],
     }
     return manifest
 
@@ -144,6 +170,7 @@ if __name__ == '__main__':
     parser.add_argument('--branch', default='main')
     parser.add_argument('--run-id', type=int, required=True)
     parser.add_argument('--attempt', type=int, required=True)
+    parser.add_argument('--technology', choices=['node', 'maven'])
     args = parser.parse_args()
 
     manifest = collect(
@@ -155,6 +182,7 @@ if __name__ == '__main__':
         args.branch,
         args.run_id,
         args.attempt,
+        args.technology,
     )
     print(json.dumps({
         'decision': manifest['decision'],

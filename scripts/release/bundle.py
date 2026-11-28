@@ -30,6 +30,8 @@ def assemble(manifest, root, destination):
             or deploy.get('identity') not in ('provider-source', 'binary-digest')):
         raise ValueError('Falta identidad y smoke del despliegue')
     required = {'build', 'sast', 'sca', 'secrets', 'integration', 'performance', 'go-no-go'}
+    if manifest.get('technology') in ('node', 'maven'):
+        required = {'build', 'quality', 'sast', 'sca', 'secrets', 'gate', 'deployment', 'go-no-go'} | ({'e2e'} if manifest['technology'] == 'node' else {'integration', 'performance', 'dast'})
     reports = manifest.get('reports', [])
     if not required.issubset({r.get('kind') for r in reports}):
         raise ValueError('Faltan categorias obligatorias')
@@ -44,12 +46,14 @@ def assemble(manifest, root, destination):
         relative = PurePosixPath(name)
         if (not name or relative.is_absolute() or '..' in relative.parts or '\\' in name
                 or ':' in name or any(p.startswith('.') for p in relative.parts)
-                or relative.suffix.lower() not in ('.json', '.xml', '.md', '.csv', '.txt')):
+                or relative.suffix.lower() not in ('.json', '.xml', '.md', '.csv', '.txt', '.sarif', '.info')):
             raise ValueError('Ruta de reporte no permitida')
         path = root / name
         if path.is_symlink() or not path.resolve().is_relative_to(root):
             raise ValueError('Reporte fuera del directorio')
         data = path.read_bytes()
+        if report.get('checksum') and report['checksum'] != digest(data):
+            raise ValueError('Checksum del reporte no coincide')
         if not data or len(data) > 20_000_000:
             raise ValueError('Reporte vacio o demasiado grande')
         content = data.decode('utf-8-sig')

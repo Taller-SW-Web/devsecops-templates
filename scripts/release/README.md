@@ -1,29 +1,29 @@
-# Herramientas de release
+# Evidencias y release SemVer
 
-`bundle.py` valida SemVer, identidad de reportes, obligatoriedad, rutas, formatos y
-checksums; reabre el ZIP para verificarlo. No descubre resultados ni convierte un
-manifest escrito a mano en evidencia auténtica. Debe alimentarlo un colector de
-artefactos del run, con revisión de privacidad y procedencia del proveedor.
+workflow-deploy.yml descarga los artefactos del run actual, ejecuta collect_evidence.py
+con la tecnologia del caller y pasa el manifiesto a bundle.py. No reutiliza reportes
+historicos para rellenar categorias ausentes.
 
-`publish.py` consulta el run/attempt de producción y rechaza otro SHA, rama, evento,
-workflow o conclusión. Una versión existente falla de forma segura sin sobrescribir.
-Usa GitHub CLI con token de `contents:write` solo al publicar. No infiere SemVer.
+Estructura: manifest/, quality/, security/{sast,sca,secrets,dast}/,
+tests/{unit,integration,e2e,performance}/, deployment/ y go-no-go.json.
+Las categorias no aplicables se declaran en not_applicable; no reciben reportes ajenos.
 
-```powershell
-python -B -m unittest discover -s scripts/release -p test_*.py -v
-python scripts/release/bundle.py --manifest candidato.json --root evidencia --output paquete
-python scripts/release/publish.py --manifest candidato.json --root evidencia --output publicacion
+Backend exige integracion, performance y DAST. Frontend exige E2E. Ambos exigen
+unitarias, calidad, SAST, SCA, secretos, decision integral y despliegue saludable.
+Se conservan todos los XML encontrados y sus rutas de origen. Los estados proceden
+del gate-result.json del mismo SHA, repositorio, run y attempt, no de la existencia
+del archivo. La recoleccion es posterior a los jobs y usa artefactos del run actual.
+El timestamp del manifiesto es el de recoleccion; los reportes retienen su contenido
+original. Cada entrada incluye origen, version, entorno, identidad y SHA-256.
+
+bundle.py valida identidad, categorias, formatos, rutas y hashes, comprueba el ZIP
+y rechaza sobrescribir un paquete existente. Mantiene manifiesto y SHA256SUMS.
+provider-source acredita el SHA fuente del proveedor, no identidad binaria servida.
+
+No se deben publicar estos cambios antes de sincronizar main y comprobar los tags.
+VERSION sigue siendo la fuente SemVer; resolver una colision debe fallar, nunca
+sobrescribir releases. La publicacion sigue condicionada a GO y healthcheck.
+
+```sh
+python -m unittest discover -s scripts/release -p 'test_*.py'
 ```
-
-El manifiesto exige: `version` (vX.Y.Z), `sha` completo, `repository`, `branch=main`,
-`decision=GO`, `run_id`, `attempt`, `deployment` (id, sha, status, smoke, identity),
-y `reports` (kind, path, sha, repository, run_id, attempt, status). Categorías
-requeridas: build, sast, sca, secrets, integration, performance, go-no-go.
-`provider-source` acredita origen de fuente, no igualdad binaria; `binary-digest`
-solo debe usarse con comprobación independiente del digest servido por el proveedor.
-
-Estado: utilidades locales verificables; **publicación automática no conectada aún**.
-Faltan colector de reportes normalizados e identidad de Railway/Vercel. No se debe
-conectar el publicador a un healthcheck HTTP 200 ni rellenar esos campos con supuestos.
-No hay una release global: versiones independientes por componente y pareja de
-SHAs explícita en specs cuando ambos despliegues estén acreditados.

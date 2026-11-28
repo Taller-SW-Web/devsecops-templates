@@ -100,7 +100,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   policy:
-    name: Deployment Policy
+    name: Política de entrega
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -115,7 +115,7 @@ jobs:
           technology: ${{ inputs.technology }}
           language: ${{ inputs.language }}
   prepare:
-    name: Resolve Commit, Config and SemVer
+    name: Resolver commit, configuración y SemVer
     needs: policy
     if: needs.policy.outputs.allow_deploy == 'true'
     runs-on: ubuntu-latest
@@ -137,7 +137,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Checkout Shared Shell Scripts
+      - name: Obtener scripts centrales de CI/CD
         uses: actions/checkout@v4
         with:
           repository: Taller-SW-Web/devsecops-templates
@@ -155,7 +155,7 @@ jobs:
             test "$SOURCE_SHA" = "$GITHUB_SHA"
           fi
           bash .devsecops-templates/scripts/deploy/validate-deployment-config.sh
-      - name: Resolve SemVer Release Version
+      - name: Resolver versión SemVer sin colisiones
         id: version
         if: ${{ !inputs.rollback && github.ref == 'refs/heads/main' }}
         env:
@@ -202,7 +202,7 @@ jobs:
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
   deployment:
-    name: Deploy Production and Smoke
+    name: Despliegue y verificación de salud
     environment: production
     needs: [policy, prepare, quality]
     # Despliega solo con gate GO del mismo run; el rollback es el unico camino sin validacion (y exige autorizacion).
@@ -217,7 +217,7 @@ jobs:
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
-      - name: Checkout Shared Shell Scripts
+      - name: Obtener scripts centrales de CI/CD
         uses: actions/checkout@v4
         with:
           repository: Taller-SW-Web/devsecops-templates
@@ -259,7 +259,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.rollback && (inputs.release_tag || (github.ref_type == 'tag' && github.ref_name)) || needs.prepare.outputs.release_version }}
         run: bash .devsecops-templates/scripts/deploy/write-deployment-summary.sh
   release:
-    name: Assemble Evidence ZIP and Publish Release
+    name: Publicación SemVer y evidencias
     needs: [policy, prepare, quality, deployment]
     if: ${{ !cancelled() && !inputs.rollback && needs.policy.outputs.allow_release == 'true' && github.ref == 'refs/heads/main' && needs.deployment.result == 'success' }}
     runs-on: ubuntu-latest
@@ -275,11 +275,11 @@ jobs:
           ref: main
           path: .devsecops-templates
           persist-credentials: false
-      - name: Download All Run Artifacts
+      - name: Descargar artefactos de esta ejecución
         uses: actions/download-artifact@v4
         with:
           path: downloaded-artifacts
-      - name: Collect Evidence, Build ZIP and Package Artifact
+      - name: Clasificar evidencias y generar ZIP con hashes
         id: bundle
         env:
           VERSION: ${{ needs.prepare.outputs.release_version }}
@@ -299,7 +299,8 @@ jobs:
             --repository "$REPOSITORY" \
             --branch main \
             --run-id "$RUN_ID" \
-            --attempt "$ATTEMPT"
+            --attempt "$ATTEMPT" \
+            --technology "$TECHNOLOGY"
           python3 -B .devsecops-templates/scripts/release/bundle.py \
             --manifest candidate-manifest.json \
             --root evidence-root \
@@ -356,7 +357,7 @@ jobs:
             --notes-file release-assets/release-notes.md \
             --draft=false \
             --latest=true
-      - name: Publish Release Summary
+      - name: Publicar resumen de versión y evidencias
         if: always()
         env:
           VERSION: ${{ needs.prepare.outputs.release_version }}
